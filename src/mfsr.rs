@@ -1,15 +1,11 @@
 use std::{
     collections::HashMap,
-    io::Cursor,
     time::{Duration, SystemTime},
 };
 
-use fuser::{FileAttr, FileType, Filesystem, ReplyOpen, Request};
+use fuser::{FileAttr, FileType, Filesystem, ReplyDirectory, ReplyOpen, Request, ReplyEmpty};
 
-use crate::{
-    types::{Inode, SuperBlock},
-    utils::current_timestamp,
-};
+use crate::types::{Inode, SuperBlock};
 
 pub struct Mfsr {
     super_block: SuperBlock,
@@ -90,6 +86,41 @@ impl Filesystem for Mfsr {
             512,
             self.super_block.block_size,
         )
+    }
+
+    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
+        reply.opened(self.current_id, 0);
+        self.current_id += 1;
+    }
+
+    fn readdir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let home = self.inodes.get(&2).unwrap();
+        let tmp = self.inodes.get(&3).unwrap();
+        let _ = reply.add(home.id, 1, home.kind, &home.file_name);
+        let _ = reply.add(tmp.id, 2, tmp.kind, &tmp.file_name);
+        self.inodes.entry(2).and_modify(|inode| inode.open_file_handles += 1);
+        self.inodes.entry(3).and_modify(|inode| inode.open_file_handles += 1);
+        reply.ok();
+    }
+
+    fn releasedir(
+            &mut self,
+            _req: &Request<'_>,
+            _ino: u64,
+            _fh: u64,
+            _flags: i32,
+            reply: ReplyEmpty,
+        ) {
+        self.inodes.entry(2).and_modify(|inode| inode.open_file_handles -= 1);
+        self.inodes.entry(3).and_modify(|inode| inode.open_file_handles -= 1);
+        reply.ok()
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
