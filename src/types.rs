@@ -1,4 +1,6 @@
-use fuser::FileType;
+use std::time::SystemTime;
+
+use fuser::{FileAttr, FileType};
 use serde::{Deserialize, Serialize};
 
 use crate::utils::current_timestamp;
@@ -44,9 +46,10 @@ impl Default for SuperBlock {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Inode {
     pub id: u64,
-    pub file_name: String,
+    pub name: String,
     pub parent: Option<u64>,
     pub open_file_handles: u64,
     pub size: u64,
@@ -58,4 +61,26 @@ pub struct Inode {
     pub hardlinks: u32,
     pub uid: u32,
     pub gid: u32,
+}
+
+impl Inode {
+    pub fn into_fileattr(&self) -> FileAttr {
+        FileAttr {
+            ino: self.id,
+            size: self.size,
+            blocks: 0,
+            atime: SystemTime::now(),
+            mtime: SystemTime::now(),
+            ctime: SystemTime::now(),
+            crtime: SystemTime::now(),
+            kind: self.kind,
+            perm: self.mode,
+            nlink: 0,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            blksize: 0,
+            flags: 0,
+        }
+    }
 }
