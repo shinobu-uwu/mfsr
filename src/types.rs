@@ -57,24 +57,24 @@ pub struct Inode {
     pub last_modified: Option<u64>,
     pub last_metadata_changed: Option<u64>,
     pub kind: FileType,
-    pub mode: u16,
+    pub mode: u32,
     pub hardlinks: u32,
     pub uid: u32,
     pub gid: u32,
 }
 
-impl Inode {
-    pub fn into_fileattr(&self) -> FileAttr {
+impl From<Inode> for FileAttr {
+    fn from(inode: Inode) -> Self {
         FileAttr {
-            ino: self.id,
-            size: self.size,
+            ino: inode.id,
+            size: inode.size,
             blocks: 0,
             atime: SystemTime::now(),
             mtime: SystemTime::now(),
             ctime: SystemTime::now(),
             crtime: SystemTime::now(),
-            kind: self.kind,
-            perm: self.mode,
+            kind: inode.kind,
+            perm: inode.mode as u16,
             nlink: 0,
             uid: 0,
             gid: 0,

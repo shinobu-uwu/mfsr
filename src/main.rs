@@ -2,6 +2,8 @@ use std::env::args;
 
 use mfsr::Mfsr;
 
+use crate::types::Inode;
+
 mod mfsr;
 mod types;
 mod utils;

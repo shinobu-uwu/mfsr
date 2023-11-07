@@ -10,4 +10,3 @@ ctrlc = "3.4.1"
 fuser = "0.14.0"
 libc = "0.2.149"
 serde = {version="1.0.190", features = ["derive"]}
-gptman = "1.0.2"
