@@ -276,4 +276,19 @@ impl Filesystem for Mfsr {
             None => reply.error(ENOENT),
         };
     }
+
+    fn write(
+            &mut self,
+            _req: &Request<'_>,
+            ino: u64,
+            fh: u64,
+            offset: i64,
+            data: &[u8],
+            write_flags: u32,
+            flags: i32,
+            lock_owner: Option<u64>,
+            reply: fuser::ReplyWrite,
+        ) {
+        
+    }
 }

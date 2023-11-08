@@ -57,10 +57,10 @@ pub struct Inode {
     pub last_modified: Option<u64>,
     pub last_metadata_changed: Option<u64>,
     pub kind: FileType,
-    pub mode: u32,
+    pub mode: libc::mode_t,
     pub hardlinks: u32,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: libc::uid_t,
+    pub gid: libc::gid_t,
 }
 
 impl From<Inode> for FileAttr {
