@@ -9,7 +9,7 @@ use fuser::{
 };
 use libc::{EEXIST, ENOENT};
 
-use crate::types::{Inode, SuperBlock};
+use crate::types::{inode::Inode, super_block::SuperBlock};
 
 pub struct Mfsr {
     super_block: SuperBlock,
@@ -32,11 +32,8 @@ impl Mfsr {
         self.inodes.get(&inode_id)
     }
 
-    pub fn get_children_inodes(&self, parent_id: u64) -> Vec<&Inode> {
-        self.inodes
-            .values()
-            .filter(|i| i.parent == Some(parent_id))
-            .collect()
+    pub fn get_inode_mut(&mut self, inode_id: u64) -> Option<&mut Inode> {
+        self.inodes.get_mut(&inode_id)
     }
 
     pub fn insert_inode(&mut self, inode: Inode) {
@@ -44,10 +41,14 @@ impl Mfsr {
         self.next_id += 1
     }
 
-    pub fn lookup_inode(&self, parent_id: u64, name: &str) -> Option<&Inode> {
-        self.inodes
-            .values()
-            .find(|inode| inode.parent == Some(parent_id) && inode.name == name)
+    pub fn lookup_inode(&self, parent_id: u64, name: &OsStr) -> Option<&Inode> {
+        match self.get_inode(parent_id) {
+            Some(inode) => match inode.directory_entries.get(name) {
+                Some(id) => self.get_inode(*id),
+                None => None,
+            },
+            None => None,
+        }
     }
 
     pub fn close_inode(&mut self, inode_id: u64) {
@@ -61,11 +62,11 @@ impl Filesystem for Mfsr {
         _req: &Request<'_>,
         _config: &mut fuser::KernelConfig,
     ) -> Result<(), libc::c_int> {
+        // root inode
         self.insert_inode(Inode {
             id: 1,
-            name: "".to_string(),
-            parent: None,
             open_file_handles: 0,
+            directory_entries: BTreeMap::new(),
             size: 0,
             last_accessed: None,
             last_modified: None,
@@ -110,20 +111,11 @@ impl Filesystem for Mfsr {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        if let Some(_) = self.inodes.get(&ino) {
-            let directory_inodes: Vec<_> = self
-                .inodes
-                .values()
-                .filter(|i| i.parent == Some(ino))
-                .cloned()
-                .collect();
-
-            for (i, inode) in directory_inodes.into_iter().enumerate() {
+        if let Some(parent_inode) = self.inodes.get(&ino) {
+            for (i, (name, id)) in parent_inode.directory_entries.iter().enumerate() {
                 if offset == 0 {
-                    let _ = reply.add(inode.id, (i as i64) + 1, inode.kind, &inode.name);
-                    if let Some(inode) = self.inodes.get_mut(&inode.id) {
-                        inode.open_file_handles += 1;
-                    }
+                    let inode = self.get_inode(*id).unwrap();
+                    let _ = reply.add(*id, (i as i64) + 1, inode.kind, &name);
                 }
             }
             reply.ok();
@@ -173,7 +165,7 @@ impl Filesystem for Mfsr {
 
     fn create(
         &mut self,
-        _req: &Request<'_>,
+        request: &Request<'_>,
         parent: u64,
         name: &OsStr,
         mode: u32,
@@ -181,35 +173,50 @@ impl Filesystem for Mfsr {
         flags: i32,
         reply: fuser::ReplyCreate,
     ) {
-        let inode = Inode {
-            id: self.next_id,
-            name: name.to_str().unwrap().to_owned(),
-            parent: Some(parent),
-            open_file_handles: 1,
-            size: 0,
-            last_accessed: None,
-            last_modified: None,
-            last_metadata_changed: None,
-            kind: FileType::RegularFile,
-            mode: mode.try_into().unwrap(),
-            hardlinks: 0,
-            uid: 0,
-            gid: 0,
-        };
-        self.next_fh += 1;
-        reply.created(
-            &Duration::from_secs(2),
-            &inode.clone().into(),
-            0,
-            2,
-            flags.try_into().unwrap(),
-        );
-        self.insert_inode(inode);
+        if self.lookup_inode(parent, name).is_some() {
+            reply.error(EEXIST);
+            return;
+        }
+
+        match self.get_inode(parent) {
+            Some(parent_inode) => {
+                let id = self.next_id;
+                let new_inode = Inode {
+                    id,
+                    directory_entries: BTreeMap::new(),
+                    open_file_handles: 1,
+                    size: 0,
+                    last_accessed: None,
+                    last_modified: None,
+                    last_metadata_changed: None,
+                    kind: FileType::RegularFile,
+                    mode,
+                    hardlinks: 0,
+                    uid: request.uid(),
+                    gid: request.gid(),
+                };
+                self.insert_inode(new_inode.clone());
+                reply.created(
+                    &Duration::new(0, 0),
+                    &new_inode.into(),
+                    0,
+                    self.next_fh,
+                    flags as u32,
+                );
+                self.next_fh += 1;
+
+                self.get_inode_mut(parent)
+                    .unwrap()
+                    .directory_entries
+                    .insert(name.to_owned(), id);
+            }
+            None => reply.error(ENOENT),
+        }
     }
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        match self.lookup_inode(parent, name.to_str().unwrap()) {
-            Some(i) => reply.entry(&Duration::new(0, 0), &i.clone().into(), 0),
+        match self.lookup_inode(parent, name) {
+            Some(i) => reply.entry(&Duration::new(0, 0), &i.into(), 0),
             None => reply.error(ENOENT),
         }
     }
@@ -246,7 +253,7 @@ impl Filesystem for Mfsr {
 
     fn mkdir(
         &mut self,
-        _req: &Request<'_>,
+        request: &Request<'_>,
         parent: u64,
         name: &OsStr,
         mode: u32,
@@ -255,10 +262,9 @@ impl Filesystem for Mfsr {
     ) {
         match self.get_inode(parent) {
             Some(_) => {
+                let id = self.next_id;
                 let inode = Inode {
-                    id: self.next_id,
-                    name: name.to_str().unwrap().to_string(),
-                    parent: Some(parent),
+                    id,
                     open_file_handles: 0,
                     size: 0,
                     last_accessed: None,
@@ -267,28 +273,32 @@ impl Filesystem for Mfsr {
                     kind: FileType::Directory,
                     mode,
                     hardlinks: 2,
-                    uid: 0,
-                    gid: 0,
+                    uid: request.uid(),
+                    gid: request.gid(),
+                    directory_entries: BTreeMap::new(),
                 };
                 self.insert_inode(inode.clone());
-                reply.entry(&Duration::new(0, 0), &inode.into(), 0)
+                reply.entry(&Duration::new(0, 0), &inode.into(), 0);
+                self.get_inode_mut(parent)
+                    .unwrap()
+                    .directory_entries
+                    .insert(name.to_owned(), id);
             }
             None => reply.error(ENOENT),
         };
     }
 
     fn write(
-            &mut self,
-            _req: &Request<'_>,
-            ino: u64,
-            fh: u64,
-            offset: i64,
-            data: &[u8],
-            write_flags: u32,
-            flags: i32,
-            lock_owner: Option<u64>,
-            reply: fuser::ReplyWrite,
-        ) {
-        
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        write_flags: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+        reply: fuser::ReplyWrite,
+    ) {
     }
 }
