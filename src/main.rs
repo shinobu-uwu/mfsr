@@ -1,14 +1,16 @@
-#![allow(unused_variables)]
-use std::env::args;
-
-use mfsr::Mfsr;
-
 mod mfsr;
 mod types;
-mod utils;
+
+use std::{fs::File, io::{Cursor, Read}};
+
+use types::super_block::SuperBlock;
+
 
 fn main() {
-    let path = args().nth(1).expect("Select a partition to be formatted");
-
-    fuser::mount2(Mfsr::new(), path.clone(), &[]).unwrap();
+    let mut file = File::options().read(true).open("/dev/nvme0n1p4").unwrap();
+    let mut buf = [0; 1024];
+    file.read(&mut buf).unwrap();
+    let cursor = Cursor::new(buf);
+    let sb = SuperBlock::deserialize_from(cursor).unwrap();
+    dbg!(sb);
 }
