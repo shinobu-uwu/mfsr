@@ -1,13 +1,13 @@
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    time::{Duration, SystemTime}
+    time::{Duration, SystemTime},
 };
 
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
-use libc::{EEXIST, ENOENT, EINVAL};
+use libc::{EEXIST, EINVAL, ENOENT};
 
 use crate::types::{inode::Inode, super_block::SuperBlock};
 
@@ -69,9 +69,9 @@ impl Filesystem for Mfsr {
             directory_entries: BTreeMap::new(),
             block_count: 0,
             size: 0,
-            last_accessed: SystemTime::now(),
-            last_modified: SystemTime::now(),
-            last_metadata_changed: SystemTime::now(),
+            last_accessed: 0,
+            last_modified: 0,
+            last_metadata_changed: 0,
             kind: FileType::Directory,
             mode: 777,
             hard_links: 0,
@@ -79,8 +79,12 @@ impl Filesystem for Mfsr {
             gid: req.gid(),
             extended_attributes: BTreeMap::new(),
             flags: 0,
-            creation_time: SystemTime::now(),
+            creation_time: 0,
             rdev: 0,
+            direct_blocks: todo!(),
+            indirect_block: todo!(),
+            double_indirect_block: todo!(),
+            checksum: todo!(),
         });
 
         Ok(())
@@ -256,10 +260,10 @@ impl Filesystem for Mfsr {
                     open_file_handles: 0,
                     size: 0,
                     block_count: 0,
-                    creation_time: SystemTime::now(),
-                    last_accessed: SystemTime::now(),
-                    last_modified: SystemTime::now(),
-                    last_metadata_changed: SystemTime::now(),
+                    creation_time: 0,
+                    last_accessed: 0,
+                    last_modified: 0,
+                    last_metadata_changed: 0,
                     kind: FileType::Directory,
                     mode: mode as u16,
                     hard_links: 2,
@@ -269,9 +273,17 @@ impl Filesystem for Mfsr {
                     extended_attributes: BTreeMap::new(),
                     flags: 0,
                     rdev: 0,
+                    direct_blocks: todo!(),
+                    indirect_block: todo!(),
+                    double_indirect_block: todo!(),
+                    checksum: todo!(),
                 };
                 self.insert_inode(inode.clone());
-                reply.entry(&Duration::new(0, 0), &inode.to_file_attr(&self.super_block), 0);
+                reply.entry(
+                    &Duration::new(0, 0),
+                    &inode.to_file_attr(&self.super_block),
+                    0,
+                );
                 self.get_inode_mut(parent)
                     .unwrap()
                     .directory_entries

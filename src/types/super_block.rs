@@ -1,8 +1,11 @@
-use std::{time::SystemTime, io::{Write, Read}};
+use std::{
+    io::{Read, Write},
+    time::SystemTime,
+};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-const MAGIC_NUMBER: u32 = 0x4D534653;
+pub const SB_MAGIC_NUMBER: u32 = 0x4D534653;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SuperBlock {
@@ -20,7 +23,6 @@ pub struct SuperBlock {
     pub uid: u64,
     pub gid: u64,
     pub checksum: u64,
-
 }
 
 impl SuperBlock {
@@ -33,7 +35,7 @@ impl SuperBlock {
 
     pub fn deserialize_from<R>(r: R) -> Result<Self, Box<dyn std::error::Error>>
     where
-        R: Read
+        R: Read,
     {
         let sb: Self = bincode::deserialize_from(r)?;
         Ok(sb)
@@ -43,7 +45,7 @@ impl SuperBlock {
 impl Default for SuperBlock {
     fn default() -> Self {
         Self {
-            magic: MAGIC_NUMBER,
+            magic: SB_MAGIC_NUMBER,
             block_size: 512,
             created_at: SystemTime::now(),
             modified_at: SystemTime::now(),

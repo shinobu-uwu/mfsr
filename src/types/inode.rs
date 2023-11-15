@@ -2,6 +2,8 @@ use std::{collections::BTreeMap, ffi::OsString, time::SystemTime};
 
 use fuser::{FileAttr, FileType};
 
+use crate::utils::timestamp_to_system_time;
+
 use super::super_block::SuperBlock;
 
 #[derive(Debug, Clone)]
@@ -10,10 +12,10 @@ pub struct Inode {
     pub directory_entries: BTreeMap<OsString, u64>,
     pub open_file_handles: u64,
     pub size: u64,
-    pub creation_time: SystemTime,
-    pub last_accessed: SystemTime,
-    pub last_modified: SystemTime,
-    pub last_metadata_changed: SystemTime,
+    pub creation_time: u64,
+    pub last_accessed: u64,
+    pub last_modified: u64,
+    pub last_metadata_changed: u64,
     pub kind: FileType,
     pub mode: u16,
     pub hard_links: u32,
@@ -23,6 +25,10 @@ pub struct Inode {
     pub rdev: u32,
     pub flags: u32,
     pub extended_attributes: BTreeMap<OsString, OsString>,
+    pub direct_blocks: [u64; 12],
+    pub indirect_block: u64,
+    pub double_indirect_block: u64,
+    pub checksum: u32,
 }
 
 impl Inode {
@@ -31,10 +37,10 @@ impl Inode {
             ino: self.id,
             size: self.size,
             blocks: self.block_count,
-            atime: self.last_accessed,
-            mtime: self.last_modified,
-            ctime: self.last_metadata_changed,
-            crtime: self.creation_time,
+            atime: timestamp_to_system_time(self.last_accessed),
+            mtime: timestamp_to_system_time(self.last_modified),
+            ctime: timestamp_to_system_time(self.last_metadata_changed),
+            crtime: timestamp_to_system_time(self.creation_time),
             kind: self.kind,
             perm: self.mode,
             nlink: self.hard_links,
