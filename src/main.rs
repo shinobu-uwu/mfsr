@@ -3,34 +3,33 @@ mod mfsr;
 mod types;
 mod utils;
 
-use std::{path::PathBuf, fs::OpenOptions, time::{SystemTime, UNIX_EPOCH}, io::{BufWriter, Write, Cursor, Read}};
+use std::{
+    fs::OpenOptions,
+    io::{BufWriter, Write, Read, Cursor},
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use block_utils::{get_all_device_info, get_device_info};
+use block_utils::get_device_info;
 use clap::Parser;
 use cli::args::{Args, Commands};
 use types::super_block::{SuperBlock, SB_MAGIC_NUMBER};
 
 fn main() {
-    let mut file = OpenOptions::new().read(true).open("/dev/sdb4").unwrap();
-    let mut buf = [0; 1024];
-    file.read_exact(&mut buf).unwrap();
-    let mut cursor = Cursor::new(&buf);
-    let sb = SuperBlock::deserialize_from(&mut cursor).unwrap();
-    dbg!(sb);
-    // let args = Args::parse();
-    //
-    // match args.command {
-    //     Commands::Mkfs { path, block_size } => mkfs(path, block_size),
-    //     _ => todo!(),
-    // }
+    let args = Args::parse();
+
+    match args.command {
+        Commands::Mkfs { disk_path, block_size } => mkfs(disk_path, block_size),
+        Commands::Debug { disk_path } => debug_disk(disk_path),
+        _ => todo!(),
+    }
 }
 
-#[allow(unused_variables)]
 fn mkfs(path: PathBuf, block_size: u32) {
     let device = get_device_info(&path).expect("Invalid device");
-    let uid = nix::unistd::geteuid().as_raw() as u64;
-    let gid = nix::unistd::getegid().as_raw() as u64;
-    let mut sb = SuperBlock{
+    let uid = unsafe { libc::getegid() };
+    let gid = unsafe { libc::getegid() };
+    let mut sb = SuperBlock {
         magic: SB_MAGIC_NUMBER,
         block_size,
         created_at: SystemTime::now(),
@@ -46,8 +45,25 @@ fn mkfs(path: PathBuf, block_size: u32) {
         gid,
         checksum: 0,
     };
-    let file = OpenOptions::new().write(true).open(&path).expect("Invalid device");
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("Invalid device");
     let mut buf = BufWriter::new(&file);
-    sb.serialize_into(&mut buf).expect("Failed to serialize superblock");
+    sb.serialize_into(&mut buf)
+        .expect("Failed to serialize superblock");
     buf.flush().expect("Failed to flush superblock");
+}
+
+fn debug_disk(path: PathBuf) {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(&path)
+        .expect("Invalid device");
+    const SB_SIZE: usize = std::mem::size_of::<SuperBlock>();
+    let mut buf = [0; SB_SIZE];
+    file.read_exact(&mut buf).expect("Failed to read device");
+    let cursor = Cursor::new(buf);
+    let sb = SuperBlock::deserialize_from(cursor).expect("Failed to deserialize, bad superblock");
+    dbg!(sb);
 }

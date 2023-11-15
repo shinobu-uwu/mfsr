@@ -14,7 +14,7 @@ pub struct Args {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     Mkfs {
-        path: PathBuf,
+        disk_path: PathBuf,
         #[arg(default_value = "4096", short, long)]
         block_size: u32,
     },
@@ -22,4 +22,7 @@ pub enum Commands {
         source: PathBuf,
         directory: PathBuf,
     },
+    Debug {
+        disk_path: PathBuf
+    }
 }

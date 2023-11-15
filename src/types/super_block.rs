@@ -20,8 +20,8 @@ pub struct SuperBlock {
     pub free_inodes: u64,
     pub groups: u64,
     pub data_blocks_per_group: u64,
-    pub uid: u64,
-    pub gid: u64,
+    pub uid: libc::uid_t,
+    pub gid: libc::gid_t,
     pub checksum: u64,
 }
 
@@ -42,23 +42,3 @@ impl SuperBlock {
     }
 }
 
-impl Default for SuperBlock {
-    fn default() -> Self {
-        Self {
-            magic: SB_MAGIC_NUMBER,
-            block_size: 512,
-            created_at: SystemTime::now(),
-            modified_at: SystemTime::now(),
-            last_mounted_at: SystemTime::now(),
-            block_count: 0,
-            inode_count: 0,
-            free_blocks: 0,
-            free_inodes: 0,
-            groups: 0,
-            data_blocks_per_group: 0,
-            uid: 0,
-            gid: 0,
-            checksum: 0,
-        }
-    }
-}
