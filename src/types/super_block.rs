@@ -23,7 +23,7 @@ pub struct SuperBlock {
     pub data_blocks_per_group: u64,
     pub uid: libc::uid_t,
     pub gid: libc::gid_t,
-    pub checksum: u64,
+    pub checksum: u32,
 }
 
 impl SuperBlock {
@@ -31,15 +31,61 @@ impl SuperBlock {
     where
         W: Write,
     {
-        bincode::serialize_into(w, self)?;
-        Ok(())
+        self.checksum();
+        bincode::serialize_into(w, self).map_err(|e| e.into())
     }
 
     pub fn deserialize_from<R>(r: R) -> Result<Self>
     where
         R: Read,
     {
-        let sb: Self = bincode::deserialize_from(r)?;
-        Ok(sb)
+        let mut sb: Self = bincode::deserialize_from(r)?;
+
+        if !sb.verify_checksum() {
+            Err("Invalid superblock checksum".into())
+        } else {
+            Ok(sb)
+        }
+
+    }
+
+    pub fn checksum(&mut self) {
+        self.checksum = self.calculate_checksum();
+    }
+
+    pub fn calculate_checksum(&self) -> u32 {
+        let mut hasher = Hasher::new();
+        hasher.update(&bincode::serialize(&self).unwrap());
+        hasher.finalize()
+    }
+
+    pub fn verify_checksum(&mut self) -> bool {
+        let checksum = self.checksum;
+        self.checksum = 0;
+        let ok = checksum == self.calculate_checksum();
+        self.checksum = checksum;
+
+        ok
+    }
+}
+
+impl Default for SuperBlock {
+    fn default() -> Self {
+        Self {
+            magic: Default::default(),
+            block_size: Default::default(),
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            last_mounted_at: SystemTime::now(),
+            block_count: Default::default(),
+            inode_count: Default::default(),
+            free_blocks: Default::default(),
+            free_inodes: Default::default(),
+            groups: Default::default(),
+            data_blocks_per_group: Default::default(),
+            uid: Default::default(),
+            gid: Default::default(),
+            checksum: Default::default(),
+        }
     }
 }

@@ -18,18 +18,14 @@ use types::super_block::{SuperBlock, SB_MAGIC_NUMBER};
 
 use crate::mfsr::Mfsr;
 
-fn main() {
-    fuser::mount2(Mfsr::new(SuperBlock::default()), "/tmp/mfsr", &[]);
-    // let args = Args::parse();
-    //
-    // match args.command {
-    //     Commands::Mkfs {
-    //         disk_path,
-    //         block_size,
-    //     } => mkfs(disk_path, block_size),
-    //     Commands::Debug { disk_path } => debug_disk(disk_path),
-    //     Commands::Mount { source, directory } => mount(source, directory),
-    // }
+    match args.command {
+        Commands::Mkfs {
+            disk_path,
+            block_size,
+        } => mkfs(disk_path, block_size),
+        Commands::Debug { disk_path } => debug_disk(disk_path),
+        _ => todo!(),
+    }
 }
 
 fn mkfs(path: PathBuf, block_size: u32) {
