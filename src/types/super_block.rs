@@ -1,5 +1,4 @@
 use std::{
-    alloc::System,
     io::{Read, Write},
     time::SystemTime,
 };

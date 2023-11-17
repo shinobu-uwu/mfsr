@@ -61,21 +61,21 @@ impl Mfsr {
         }
     }
 
-    pub fn close_inode(&mut self, inode_id: u64) {
+    pub fn close_inode(&mut self, _inode_id: u64) {
         // self.inodes.entry(inode_id).and_modify(|i| i.open_file_handles -= 1);
     }
 
     fn update_inode(
         &self,
-        inode: &mut Inode,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        atime: Option<fuser::TimeOrNow>,
-        ctime: Option<SystemTime>,
-        crtime: Option<SystemTime>,
-        flags: Option<u32>,
+        _inode: &mut Inode,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _crtime: Option<SystemTime>,
+        _flags: Option<u32>,
     ) {
     }
 }
@@ -136,7 +136,7 @@ impl Filesystem for Mfsr {
             for (i, (name, id)) in parent_inode.directory_entries.iter().enumerate() {
                 if offset == 0 {
                     let inode = self.get_inode(*id).unwrap();
-                    let _ = reply.add(*id, (i as i64) + 1, inode.kind, &name);
+                    let _ = reply.add(*id, (i as i64) + 1, inode.kind, name);
                 }
             }
             reply.ok();
@@ -151,7 +151,7 @@ impl Filesystem for Mfsr {
         ino: u64,
         _fh: u64,
         _flags: i32,
-        reply: ReplyEmpty,
+        _reply: ReplyEmpty,
     ) {
         self.close_inode(ino);
     }
@@ -186,11 +186,11 @@ impl Filesystem for Mfsr {
 
     fn create(
         &mut self,
-        request: &Request<'_>,
+        _request: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        mode: u32,
-        umask: u32,
+        _mode: u32,
+        _umask: u32,
         flags: i32,
         reply: fuser::ReplyCreate,
     ) {
@@ -199,7 +199,7 @@ impl Filesystem for Mfsr {
             return;
         }
 
-        let (read, write) = match flags & libc::O_ACCMODE {
+        let (_read, _write) = match flags & libc::O_ACCMODE {
             libc::O_RDONLY => (true, false),
             libc::O_WRONLY => (false, true),
             libc::O_RDWR => (true, true),
@@ -209,7 +209,7 @@ impl Filesystem for Mfsr {
             }
         };
 
-        let parent_inode = match self.get_inode(parent) {
+        let _parent_inode = match self.get_inode(parent) {
             Some(parent_inode) => parent_inode,
             None => {
                 reply.error(ENOENT);
@@ -225,7 +225,7 @@ impl Filesystem for Mfsr {
         }
     }
 
-    fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         reply.ok();
     }
 
@@ -238,9 +238,9 @@ impl Filesystem for Mfsr {
         gid: Option<u32>,
         size: Option<u64>,
         atime: Option<fuser::TimeOrNow>,
-        mtime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
         ctime: Option<SystemTime>,
-        fh: Option<u64>,
+        _fh: Option<u64>,
         crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
@@ -341,14 +341,14 @@ impl Filesystem for Mfsr {
     fn write(
         &mut self,
         _req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        data: &[u8],
-        write_flags: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
-        reply: fuser::ReplyWrite,
+        _ino: u64,
+        _fh: u64,
+        _offset: i64,
+        _data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _reply: fuser::ReplyWrite,
     ) {
         dbg!(self);
     }

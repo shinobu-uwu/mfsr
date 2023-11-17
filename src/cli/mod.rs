@@ -45,7 +45,7 @@ pub fn mkfs(path: PathBuf, block_size: u32) -> Result<()> {
 }
 
 pub fn mount(source: PathBuf, directory: PathBuf) -> Result<()> {
-    let disk = OpenOptions::new().read(true).write(true).open(&source)?;
+    let disk = OpenOptions::new().read(true).write(true).open(source)?;
     let buf = BufReader::new(&disk);
     let sb = SuperBlock::deserialize_from(buf)?;
     let fs = Mfsr::new(sb, disk)?;
@@ -55,7 +55,7 @@ pub fn mount(source: PathBuf, directory: PathBuf) -> Result<()> {
 }
 
 pub fn debug_disk(path: PathBuf) -> Result<()> {
-    let mut file = OpenOptions::new().read(true).open(&path)?;
+    let mut file = OpenOptions::new().read(true).open(path)?;
     const SB_SIZE: usize = std::mem::size_of::<SuperBlock>();
     let mut buf = [0; SB_SIZE];
     file.read_exact(&mut buf)?;

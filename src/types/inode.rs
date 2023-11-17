@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, ffi::OsString, time::SystemTime};
+use std::{collections::BTreeMap, ffi::OsString};
 
 use fuser::{FileAttr, FileType};
 
