@@ -1,9 +1,11 @@
 use std::{
+    alloc::System,
     io::{Read, Write},
     time::SystemTime,
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 
 pub const SB_MAGIC_NUMBER: u32 = 0x4D534653;
@@ -42,11 +44,10 @@ impl SuperBlock {
         let mut sb: Self = bincode::deserialize_from(r)?;
 
         if !sb.verify_checksum() {
-            Err("Invalid superblock checksum".into())
+            Err(anyhow!("Invalid superblock checksum"))
         } else {
             Ok(sb)
         }
-
     }
 
     pub fn checksum(&mut self) {
@@ -66,6 +67,10 @@ impl SuperBlock {
         self.checksum = checksum;
 
         ok
+    }
+
+    pub fn update_last_mounted(&mut self) {
+        self.last_mounted_at = SystemTime::now();
     }
 }
 

@@ -1,38 +1,41 @@
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
+    fs::File,
+    io::{Cursor, Write},
     time::{Duration, SystemTime},
 };
 
+use anyhow::Result;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
 use libc::{EEXIST, EINVAL, ENOENT};
+use memmap2::MmapMut;
 
 use crate::{
-    types::{
-        inode::Inode,
-        super_block::{self, SuperBlock, SB_MAGIC_NUMBER},
-    },
+    types::{inode::Inode, super_block::SuperBlock},
     utils::{system_time_to_timestamp, time_or_now_to_timestamp},
 };
 
 #[derive(Debug)]
 pub struct Mfsr {
     super_block: SuperBlock,
+    io_map: MmapMut,
     inodes: BTreeMap<u64, Inode>,
     next_id: u64,
     next_fh: u64,
 }
 
 impl Mfsr {
-    pub fn new(super_block: SuperBlock) -> Self {
-        Self {
+    pub fn new(super_block: SuperBlock, device: File) -> Result<Self> {
+        Ok(Self {
             inodes: BTreeMap::new(),
+            io_map: unsafe { MmapMut::map_mut(&device)? },
             super_block,
             next_id: 1,
             next_fh: 1,
-        }
+        })
     }
 
     pub fn get_inode(&self, inode_id: u64) -> Option<&Inode> {
@@ -83,33 +86,21 @@ impl Filesystem for Mfsr {
         req: &Request<'_>,
         _config: &mut fuser::KernelConfig,
     ) -> Result<(), libc::c_int> {
-        // root inode
-        self.insert_inode(Inode {
-            id: 1,
-            directory_entries: BTreeMap::new(),
-            open_file_handles: 0,
-            size: 0,
-            creation_time: 0,
-            last_accessed: 0,
-            last_modified: 0,
-            last_metadata_changed: 0,
-            kind: FileType::Directory,
-            mode: 777,
-            hard_links: 0,
-            uid: req.uid(),
-            gid: req.gid(),
-            block_count: 0,
-            rdev: 0,
-            flags: 0,
-            extended_attributes: BTreeMap::new(),
-            direct_blocks: [0; 12],
-            indirect_block: 0,
-            double_indirect_block: 0,
-            checksum: 0,
-        });
+        self.super_block.update_last_mounted();
+        self.super_block.uid = req.uid();
+        self.super_block.gid = req.gid();
 
         Ok(())
     }
+
+    fn destroy(&mut self) {
+        let buf = self.io_map.as_mut();
+        let mut cursor = Cursor::new(buf);
+
+        self.super_block.serialize_into(&mut cursor).unwrap();
+        cursor.flush().unwrap();
+    }
+
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: fuser::ReplyStatfs) {
         reply.statfs(
             self.super_block.free_blocks + self.super_block.block_count,
@@ -360,25 +351,5 @@ impl Filesystem for Mfsr {
         reply: fuser::ReplyWrite,
     ) {
         dbg!(self);
-    }
-}
-impl Default for SuperBlock {
-    fn default() -> Self {
-        Self {
-            magic: SB_MAGIC_NUMBER,
-            block_size: 512,
-            created_at: SystemTime::now(),
-            modified_at: SystemTime::now(),
-            last_mounted_at: SystemTime::now(),
-            block_count: 0,
-            inode_count: 0,
-            free_blocks: 0,
-            free_inodes: 0,
-            groups: 0,
-            data_blocks_per_group: 0,
-            uid: 100,
-            gid: 984,
-            checksum: 0,
-        }
     }
 }
