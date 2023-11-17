@@ -23,6 +23,6 @@ pub enum Commands {
         directory: PathBuf,
     },
     Debug {
-        disk_path: PathBuf
-    }
+        disk_path: PathBuf,
+    },
 }

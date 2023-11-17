@@ -3,6 +3,7 @@ use std::{
     time::SystemTime,
 };
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub const SB_MAGIC_NUMBER: u32 = 0x4D534653;
@@ -26,14 +27,15 @@ pub struct SuperBlock {
 }
 
 impl SuperBlock {
-    pub fn serialize_into<W>(&mut self, w: W) -> Result<(), Box<dyn std::error::Error>>
+    pub fn serialize_into<W>(&mut self, w: W) -> Result<()>
     where
         W: Write,
     {
-        bincode::serialize_into(w, self).map_err(|e| e.into())
+        bincode::serialize_into(w, self)?;
+        Ok(())
     }
 
-    pub fn deserialize_from<R>(r: R) -> Result<Self, Box<dyn std::error::Error>>
+    pub fn deserialize_from<R>(r: R) -> Result<Self>
     where
         R: Read,
     {
@@ -41,4 +43,3 @@ impl SuperBlock {
         Ok(sb)
     }
 }
-

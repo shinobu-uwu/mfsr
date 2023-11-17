@@ -1,3 +1,4 @@
+#![allow(unused)]
 mod cli;
 mod mfsr;
 mod types;
@@ -5,7 +6,7 @@ mod utils;
 
 use std::{
     fs::OpenOptions,
-    io::{BufWriter, Write, Read, Cursor},
+    io::{BufReader, BufWriter, Cursor, Read, Write},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -15,25 +16,32 @@ use clap::Parser;
 use cli::args::{Args, Commands};
 use types::super_block::{SuperBlock, SB_MAGIC_NUMBER};
 
-fn main() {
-    let args = Args::parse();
+use crate::mfsr::Mfsr;
 
-    match args.command {
-        Commands::Mkfs { disk_path, block_size } => mkfs(disk_path, block_size),
-        Commands::Debug { disk_path } => debug_disk(disk_path),
-        _ => todo!(),
-    }
+fn main() {
+    fuser::mount2(Mfsr::new(SuperBlock::default()), "/tmp/mfsr", &[]);
+    // let args = Args::parse();
+    //
+    // match args.command {
+    //     Commands::Mkfs {
+    //         disk_path,
+    //         block_size,
+    //     } => mkfs(disk_path, block_size),
+    //     Commands::Debug { disk_path } => debug_disk(disk_path),
+    //     Commands::Mount { source, directory } => mount(source, directory),
+    // }
 }
 
 fn mkfs(path: PathBuf, block_size: u32) {
     let device = get_device_info(&path).expect("Invalid device");
-    let uid = unsafe { libc::getegid() };
+    let uid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getegid() };
+    let now = SystemTime::now();
     let mut sb = SuperBlock {
         magic: SB_MAGIC_NUMBER,
         block_size,
-        created_at: SystemTime::now(),
-        modified_at: SystemTime::now(),
+        created_at: now,
+        modified_at: now,
         last_mounted_at: UNIX_EPOCH,
         block_count: device.capacity,
         inode_count: device.capacity,
@@ -43,7 +51,7 @@ fn mkfs(path: PathBuf, block_size: u32) {
         data_blocks_per_group: 64,
         uid,
         gid,
-        checksum: 0,
+        checksum: 1052,
     };
     let file = OpenOptions::new()
         .write(true)
@@ -53,6 +61,18 @@ fn mkfs(path: PathBuf, block_size: u32) {
     sb.serialize_into(&mut buf)
         .expect("Failed to serialize superblock");
     buf.flush().expect("Failed to flush superblock");
+}
+
+fn mount(source: PathBuf, directory: PathBuf) {
+    let disk = OpenOptions::new()
+        .read(true)
+        .open(&source)
+        .expect("Invalid device");
+    let buf = BufReader::new(&disk);
+    let sb = SuperBlock::deserialize_from(buf).expect("Failed to mount: bad superblock");
+    dbg!(&sb);
+    let fs = Mfsr::new(sb);
+    fuser::mount2(fs, directory, &[]).expect("Failed to mount filesystem");
 }
 
 fn debug_disk(path: PathBuf) {

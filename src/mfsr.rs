@@ -9,8 +9,15 @@ use fuser::{
 };
 use libc::{EEXIST, EINVAL, ENOENT};
 
-use crate::types::{inode::Inode, super_block::SuperBlock};
+use crate::{
+    types::{
+        inode::Inode,
+        super_block::{self, SuperBlock, SB_MAGIC_NUMBER},
+    },
+    utils::{system_time_to_timestamp, time_or_now_to_timestamp},
+};
 
+#[derive(Debug)]
 pub struct Mfsr {
     super_block: SuperBlock,
     inodes: BTreeMap<u64, Inode>,
@@ -19,10 +26,10 @@ pub struct Mfsr {
 }
 
 impl Mfsr {
-    pub fn new() -> Self {
+    pub fn new(super_block: SuperBlock) -> Self {
         Self {
             inodes: BTreeMap::new(),
-            super_block: SuperBlock::default(),
+            super_block,
             next_id: 1,
             next_fh: 1,
         }
@@ -54,6 +61,20 @@ impl Mfsr {
     pub fn close_inode(&mut self, inode_id: u64) {
         // self.inodes.entry(inode_id).and_modify(|i| i.open_file_handles -= 1);
     }
+
+    fn update_inode(
+        &self,
+        inode: &mut Inode,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        ctime: Option<SystemTime>,
+        crtime: Option<SystemTime>,
+        flags: Option<u32>,
+    ) {
+    }
 }
 
 impl Filesystem for Mfsr {
@@ -65,10 +86,10 @@ impl Filesystem for Mfsr {
         // root inode
         self.insert_inode(Inode {
             id: 1,
-            open_file_handles: 0,
             directory_entries: BTreeMap::new(),
-            block_count: 0,
+            open_file_handles: 0,
             size: 0,
+            creation_time: 0,
             last_accessed: 0,
             last_modified: 0,
             last_metadata_changed: 0,
@@ -77,14 +98,14 @@ impl Filesystem for Mfsr {
             hard_links: 0,
             uid: req.uid(),
             gid: req.gid(),
-            extended_attributes: BTreeMap::new(),
-            flags: 0,
-            creation_time: 0,
+            block_count: 0,
             rdev: 0,
-            direct_blocks: todo!(),
-            indirect_block: todo!(),
-            double_indirect_block: todo!(),
-            checksum: todo!(),
+            flags: 0,
+            extended_attributes: BTreeMap::new(),
+            direct_blocks: [0; 12],
+            indirect_block: 0,
+            double_indirect_block: 0,
+            checksum: 0,
         });
 
         Ok(())
@@ -225,22 +246,55 @@ impl Filesystem for Mfsr {
         uid: Option<u32>,
         gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<fuser::TimeOrNow>,
-        _mtime: Option<fuser::TimeOrNow>,
-        _ctime: Option<SystemTime>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        ctime: Option<SystemTime>,
         fh: Option<u64>,
-        _crtime: Option<SystemTime>,
+        crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
         flags: Option<u32>,
         reply: fuser::ReplyAttr,
     ) {
-        let inode = self.inodes.get(&ino);
-
-        match inode {
-            Some(i) => reply.attr(&Duration::new(0, 0), &i.to_file_attr(&self.super_block)),
-            None => reply.error(ENOENT),
+        let inode = self.get_inode(ino);
+        if inode.is_none() {
+            reply.error(ENOENT);
+            return;
         }
+
+        self.inodes.entry(ino).and_modify(|inode| {
+            if mode.is_some() {
+                inode.mode = mode.unwrap();
+            }
+
+            if uid.is_some() {
+                inode.uid = uid.unwrap();
+            }
+
+            if gid.is_some() {
+                inode.gid = gid.unwrap();
+            }
+
+            if size.is_some() {
+                inode.size = size.unwrap();
+            }
+
+            if atime.is_some() {
+                inode.last_accessed = time_or_now_to_timestamp(atime.unwrap());
+            }
+
+            if ctime.is_some() {
+                inode.last_modified = system_time_to_timestamp(ctime.unwrap());
+            }
+
+            if crtime.is_some() {
+                inode.creation_time = system_time_to_timestamp(crtime.unwrap());
+            }
+
+            if flags.is_some() {
+                inode.flags = flags.unwrap();
+            }
+        });
     }
 
     fn mkdir(
@@ -265,7 +319,7 @@ impl Filesystem for Mfsr {
                     last_modified: 0,
                     last_metadata_changed: 0,
                     kind: FileType::Directory,
-                    mode: mode as u16,
+                    mode,
                     hard_links: 2,
                     uid: request.uid(),
                     gid: request.gid(),
@@ -273,10 +327,10 @@ impl Filesystem for Mfsr {
                     extended_attributes: BTreeMap::new(),
                     flags: 0,
                     rdev: 0,
-                    direct_blocks: todo!(),
-                    indirect_block: todo!(),
-                    double_indirect_block: todo!(),
-                    checksum: todo!(),
+                    direct_blocks: [0; 12],
+                    indirect_block: 0,
+                    double_indirect_block: 0,
+                    checksum: 0,
                 };
                 self.insert_inode(inode.clone());
                 reply.entry(
@@ -305,5 +359,26 @@ impl Filesystem for Mfsr {
         lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
+        dbg!(self);
+    }
+}
+impl Default for SuperBlock {
+    fn default() -> Self {
+        Self {
+            magic: SB_MAGIC_NUMBER,
+            block_size: 512,
+            created_at: SystemTime::now(),
+            modified_at: SystemTime::now(),
+            last_mounted_at: SystemTime::now(),
+            block_count: 0,
+            inode_count: 0,
+            free_blocks: 0,
+            free_inodes: 0,
+            groups: 0,
+            data_blocks_per_group: 0,
+            uid: 100,
+            gid: 984,
+            checksum: 0,
+        }
     }
 }
