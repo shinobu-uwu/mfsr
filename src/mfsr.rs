@@ -256,36 +256,36 @@ impl Filesystem for Mfsr {
         }
 
         self.inodes.entry(ino).and_modify(|inode| {
-            if mode.is_some() {
-                inode.mode = mode.unwrap();
+            if let Some(m) = mode {
+                inode.mode = m;
             }
 
-            if uid.is_some() {
-                inode.uid = uid.unwrap();
+            if let Some(u) = uid {
+                inode.uid = u
             }
 
-            if gid.is_some() {
-                inode.gid = gid.unwrap();
+            if let Some(g) = gid {
+                inode.gid = g;
             }
 
-            if size.is_some() {
-                inode.size = size.unwrap();
+            if let Some(s) =  size {
+                inode.size = s;
             }
 
-            if atime.is_some() {
-                inode.last_accessed = time_or_now_to_timestamp(atime.unwrap());
+            if let Some(a) = atime {
+                inode.last_accessed = time_or_now_to_timestamp(a);
             }
 
-            if ctime.is_some() {
-                inode.last_modified = system_time_to_timestamp(ctime.unwrap());
+            if let Some(c) = ctime {
+                inode.last_modified = system_time_to_timestamp(c);
             }
 
-            if crtime.is_some() {
-                inode.creation_time = system_time_to_timestamp(crtime.unwrap());
+            if let Some(cr) = crtime {
+                inode.creation_time = system_time_to_timestamp(cr);
             }
 
-            if flags.is_some() {
-                inode.flags = flags.unwrap();
+            if let Some(f) = flags {
+                inode.flags = f;
             }
         });
     }
