@@ -7,6 +7,12 @@ use crate::utils::timestamp_to_system_time;
 use super::super_block::SuperBlock;
 
 #[derive(Debug, Clone)]
+pub struct InodeBlocK {
+    pub data_bitmap: u64,
+    pub inode_bitmap: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct Inode {
     pub id: u64,
     pub directory_entries: BTreeMap<OsString, u64>,

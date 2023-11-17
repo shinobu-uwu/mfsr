@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsStr,
     fs::File,
-    io::{Cursor, Write},
+    io::{Write, BufWriter},
     time::{Duration, SystemTime},
 };
 
@@ -29,13 +29,22 @@ pub struct Mfsr {
 
 impl Mfsr {
     pub fn new(super_block: SuperBlock, device: File) -> Result<Self> {
+        let inodes = BTreeMap::new();
         Ok(Self {
-            inodes: BTreeMap::new(),
+            inodes,
             io_map: unsafe { MmapMut::map_mut(&device)? },
             super_block,
             next_id: 1,
             next_fh: 1,
         })
+    }
+
+    fn next_inode_id(&self) -> u64 {
+        todo!()
+    }
+
+    fn write_inode(&self, inode: Inode) -> Result<()> {
+        Ok(())
     }
 
     pub fn get_inode(&self, inode_id: u64) -> Option<&Inode> {
@@ -64,20 +73,6 @@ impl Mfsr {
     pub fn close_inode(&mut self, _inode_id: u64) {
         // self.inodes.entry(inode_id).and_modify(|i| i.open_file_handles -= 1);
     }
-
-    fn update_inode(
-        &self,
-        _inode: &mut Inode,
-        _mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
-        _size: Option<u64>,
-        _atime: Option<fuser::TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        _crtime: Option<SystemTime>,
-        _flags: Option<u32>,
-    ) {
-    }
 }
 
 impl Filesystem for Mfsr {
@@ -95,10 +90,10 @@ impl Filesystem for Mfsr {
 
     fn destroy(&mut self) {
         let buf = self.io_map.as_mut();
-        let mut cursor = Cursor::new(buf);
+        let mut writer = BufWriter::new(buf);
 
-        self.super_block.serialize_into(&mut cursor).unwrap();
-        cursor.flush().unwrap();
+        self.super_block.serialize_into(&mut writer).unwrap();
+        writer.flush().unwrap();
     }
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: fuser::ReplyStatfs) {
@@ -225,7 +220,14 @@ impl Filesystem for Mfsr {
         }
     }
 
-    fn flush(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
         reply.ok();
     }
 
