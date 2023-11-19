@@ -1,13 +1,14 @@
 use std::{
     io::{Read, Write},
-    time::SystemTime,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Result};
 use crc32fast::Hasher;
+use libc::{gid_t, uid_t};
 use serde::{Deserialize, Serialize};
 
-pub const SB_MAGIC_NUMBER: u32 = 0x4D534653;
+const MAGIC_NUMBER: u32 = 0x4D534653;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SuperBlock {
@@ -20,14 +21,41 @@ pub struct SuperBlock {
     pub inode_count: u64,
     pub free_blocks: u64,
     pub free_inodes: u64,
-    pub groups: u64,
+    pub block_group_count: u64,
     pub data_blocks_per_group: u64,
-    pub uid: libc::uid_t,
-    pub gid: libc::gid_t,
+    pub uid: uid_t,
+    pub gid: gid_t,
     pub checksum: u32,
 }
 
 impl SuperBlock {
+    pub fn new(
+        block_size: u32,
+        block_group_count: u64,
+        data_blocks_per_group: u64,
+        uid: uid_t,
+        gid: gid_t,
+    ) -> Self {
+        let block_count = block_size as u64 * 8 * block_group_count;
+
+        Self {
+            magic: MAGIC_NUMBER,
+            block_size,
+            created_at: SystemTime::now(),
+            modified_at: UNIX_EPOCH,
+            last_mounted_at: UNIX_EPOCH,
+            block_count,
+            inode_count: block_count,
+            free_blocks: block_count,
+            free_inodes: block_count,
+            block_group_count,
+            data_blocks_per_group,
+            uid,
+            gid,
+            checksum: 0,
+        }
+    }
+
     pub fn serialize_into<W>(&mut self, w: W) -> Result<()>
     where
         W: Write,
@@ -85,7 +113,7 @@ impl Default for SuperBlock {
             inode_count: Default::default(),
             free_blocks: Default::default(),
             free_inodes: Default::default(),
-            groups: Default::default(),
+            block_group_count: Default::default(),
             data_blocks_per_group: Default::default(),
             uid: Default::default(),
             gid: Default::default(),
