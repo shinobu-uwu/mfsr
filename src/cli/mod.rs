@@ -1,14 +1,17 @@
 use std::{
     fs::OpenOptions,
-    io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write, BufRead},
-    path::PathBuf, mem::size_of,
+    io::{BufReader, BufWriter, Cursor, Read, Write},
+    mem::size_of,
+    path::{Path, PathBuf},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use libparted::Device;
 
 use crate::{
-    types::{super_block::SuperBlock, block_group::BlockGroup}, utils::get_block_group_size,
+    mfsr::Mfsr,
+    types::{block_group::BlockGroup, super_block::SuperBlock},
+    utils::get_block_group_size,
 };
 
 pub mod args;
@@ -35,7 +38,7 @@ pub fn mkfs(path: PathBuf, block_size: u32) -> Result<()> {
 
     let file = OpenOptions::new().write(true).open(&path)?;
     let mut groups: Vec<BlockGroup> = Vec::with_capacity(block_group_count as usize);
-    let empty_bitmap = vec![1; block_size as usize];
+    let empty_bitmap = vec![0; block_size as usize];
 
     for _ in 0..block_group_count {
         groups.push(BlockGroup::new(empty_bitmap.clone(), empty_bitmap.clone()));
@@ -48,10 +51,12 @@ pub fn mkfs(path: PathBuf, block_size: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn mount(source: PathBuf, directory: PathBuf) -> Result<()> {
-    let disk = OpenOptions::new().read(true).write(true).open(source)?;
-    let buf = BufReader::new(&disk);
-    let sb = SuperBlock::deserialize_from(buf)?;
+pub fn mount<P>(source: PathBuf, mount_point: PathBuf) -> Result<()>
+where
+    P: AsRef<Path>,
+{
+    let mut buf = 
+    let fs = Mfsr::new(mount_point);
     // let fs = Mfsr::new(sb, disk)?;
     // fuser::mount2(fs, directory, &[])?;
 
@@ -59,21 +64,13 @@ pub fn mount(source: PathBuf, directory: PathBuf) -> Result<()> {
 }
 
 pub fn debug_disk(path: PathBuf) -> Result<()> {
-    let mut file = OpenOptions::new().read(true).open(path)?;
+    let mut disk = OpenOptions::new().read(true).open(path)?;
     const SB_SIZE: usize = size_of::<SuperBlock>();
     let mut buf = [0; SB_SIZE];
-    file.read_exact(&mut buf)?;
+    disk.read_exact(&mut buf)?;
     let cursor = Cursor::new(buf);
     let sb = SuperBlock::deserialize_from(cursor)?; // the first group superblock
-    dbg!(&sb);
-
-    let size = sb.block_group_count as usize * size_of::<BlockGroup>();
-    let mut group_buf = vec![0; size];
-    file.rewind()?;
-    file.read_exact(&mut group_buf)?;
-    let cursor = Cursor::new(&mut group_buf);
-    let groups = BlockGroup::deserialize_from(cursor, sb.block_size, sb.block_group_count as usize)?;
-    dbg!(groups);
+    dbg!(sb);
 
     Ok(())
 }

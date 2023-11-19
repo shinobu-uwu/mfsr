@@ -1,9 +1,11 @@
 use std::{
+    mem::size_of,
     collections::BTreeMap,
     ffi::OsStr,
-    fs::File,
-    io::{BufWriter, Write},
-    time::{Duration, SystemTime},
+    fs::{File, OpenOptions},
+    io::{BufWriter, Write, Cursor},
+    path::Path,
+    time::{Duration, SystemTime}, mem::size_of,
 };
 
 use anyhow::Result;
@@ -14,8 +16,7 @@ use libc::{EEXIST, EINVAL, ENOENT};
 use memmap2::MmapMut;
 
 use crate::{
-    types::{block_group::BlockGroup, inode::Inode, super_block::SuperBlock},
-    utils::{system_time_to_timestamp, time_or_now_to_timestamp},
+    types::{block_group::BlockGroup, super_block::SuperBlock, inode::Inode},
 };
 
 #[derive(Debug)]
@@ -27,17 +28,44 @@ pub struct Mfsr {
 }
 
 impl Mfsr {
-    pub fn new(
-        super_block: SuperBlock,
-        block_groups: Vec<BlockGroup>,
-        device: File,
-    ) -> Result<Self> {
+    pub fn new<P>(mount_point: P) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        let device = OpenOptions::new().write(true).read(true).open(&mount_point)?;
+        let io_map = unsafe { MmapMut::map_mut(&device)? };
+        let mut cursor = Cursor::new(&io_map);
+        let super_block = SuperBlock::deserialize_from(&mut cursor)?;
+        let block_groups = BlockGroup::deserialize_from(cursor, super_block.block_size, super_block.block_group_count as usize)?;
+
         Ok(Self {
-            io_map: unsafe { MmapMut::map_mut(&device)? },
+            io_map,
             block_groups,
             super_block,
             next_fh: 1,
         })
+    }
+
+    fn create_root(&mut self) -> anyhow::Result<()> {
+        if self.inode_exists(1) {
+            Ok(())
+        } else {
+            self.create_inode(1, todo!())
+        }
+    }
+
+    fn inode_exists(&mut self, inode_id: u64) -> bool {
+        let group_id = (inode_id / self.super_block.block_size as u64 - 1) as usize;
+        let group = self.block_groups[group_id];
+    }
+
+    fn get_inode(&mut self, inode_id: u64) -> Option<Inode> {
+
+        todo!()
+    }
+
+    fn create_inode(&self, arg: i32, inode: Inode) -> std::result::Result<(), anyhow::Error> {
+        todo!()
     }
 
     // fn next_inode_id(&self) -> Option<u64> {

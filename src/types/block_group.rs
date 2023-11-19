@@ -1,20 +1,21 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::{types::super_block::SuperBlock, utils::get_block_group_size};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BlockGroup {
-    pub inode_bitmap: Vec<u8>,
     pub data_bitmap: Vec<u8>,
+    pub inode_bitmap: Vec<u8>,
 }
 
 impl BlockGroup {
     pub fn new(data_bitmap: Vec<u8>, inode_bitmap: Vec<u8>) -> Self {
         Self {
-            inode_bitmap,
             data_bitmap,
+            inode_bitmap,
         }
     }
 
@@ -23,14 +24,18 @@ impl BlockGroup {
         W: Write + Seek,
     {
         assert!(!groups.is_empty());
+        super_block.checksum();
         let block_size = super_block.block_size;
+
         for (i, g) in groups.iter().enumerate() {
             let offset = get_block_group_size(block_size as u32) * i as u64;
             let mut w_ref = w.by_ref();
             w_ref.seek(SeekFrom::Start(offset))?;
             super_block.serialize_into(&mut w_ref)?;
-            w_ref.write_all(g.data_bitmap.as_slice())?;
-            w_ref.write_all(g.inode_bitmap.as_slice())?;
+            // first block of the group will always be the super block
+            w_ref.seek(SeekFrom::Start(offset + block_size as u64))?;
+            w_ref.write_all(&g.data_bitmap)?;
+            w_ref.write_all(&g.inode_bitmap)?;
         }
 
         Ok(())
@@ -45,11 +50,8 @@ impl BlockGroup {
         for i in 0..count {
             let offset = get_block_group_size(block_size) * i as u64 + block_size as u64;
             r.seek(SeekFrom::Start(offset))?;
-            let mut data_bitmap = vec![0; block_size as usize];
-            r.read_exact(&mut data_bitmap)?;
-            let mut inode_bitmap = vec![0; block_size as usize];
-            r.read_exact(&mut inode_bitmap)?;
-            groups.push(Self::new(data_bitmap, inode_bitmap));
+            let group: BlockGroup = bincode::deserialize_from(&mut r)?;
+            groups.push(group);
         }
 
         Ok(groups)

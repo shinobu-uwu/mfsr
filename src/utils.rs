@@ -52,4 +52,3 @@ pub fn get_block_group_size(block_size: u32) -> u64 {
 pub fn get_data_block_size(block_size: u32) -> u32 {
     block_size * 8 * block_size
 }
-

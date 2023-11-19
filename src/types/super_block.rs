@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const MAGIC_NUMBER: u32 = 0x4D534653;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SuperBlock {
     pub magic: u32,
     pub block_size: u32,
@@ -60,7 +60,6 @@ impl SuperBlock {
     where
         W: Write,
     {
-        self.checksum();
         bincode::serialize_into(w, self).map_err(|e| e.into())
     }
 
