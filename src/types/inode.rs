@@ -1,16 +1,19 @@
-use std::{collections::BTreeMap, ffi::OsString};
+use std::{collections::BTreeMap, ffi::OsString, io::Read, io::Write};
 
+use anyhow::Result;
+use crc32fast::Hasher;
 use fuser::{FileAttr, FileType};
+use libc::{gid_t, mode_t, uid_t};
+use serde::{Deserialize, Serialize};
 
-use crate::utils::timestamp_to_system_time;
+use crate::utils::{current_timestamp, timestamp_to_system_time};
 
 use super::super_block::SuperBlock;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Inode {
     pub id: u64,
     pub directory_entries: BTreeMap<OsString, u64>,
-    pub open_file_handles: u64,
     pub size: u64,
     pub creation_time: u64,
     pub last_accessed: u64,
@@ -32,6 +35,31 @@ pub struct Inode {
 }
 
 impl Inode {
+    pub fn new(id: u64, kind: FileType, mode: mode_t, uid: uid_t, gid: gid_t, flags: u32) -> Self {
+        Self {
+            id,
+            kind,
+            mode,
+            uid,
+            gid,
+            flags,
+            directory_entries: BTreeMap::new(),
+            size: 0,
+            creation_time: current_timestamp(),
+            last_accessed: current_timestamp(),
+            last_modified: current_timestamp(),
+            last_metadata_changed: current_timestamp(),
+            hard_links: 1,
+            block_count: 0,
+            rdev: 0,
+            extended_attributes: BTreeMap::new(),
+            direct_blocks: [0; 12],
+            indirect_block: 0,
+            double_indirect_block: 0,
+            checksum: 0,
+        }
+    }
+
     pub fn to_file_attr(&self, super_block: &SuperBlock) -> FileAttr {
         FileAttr {
             ino: self.id,
@@ -49,6 +77,53 @@ impl Inode {
             rdev: self.rdev,
             blksize: super_block.block_size,
             flags: self.flags,
+        }
+    }
+
+    pub fn serialize_into<W>(&mut self, w: W) -> Result<()>
+    where
+        W: Write,
+    {
+        bincode::serialize_into(w, self).map_err(|e| e.into())
+    }
+
+    pub fn deserialize_from<R>(r: R) -> Result<Self>
+    where
+        R: Read,
+    {
+        let sb: Self = bincode::deserialize_from(r)?;
+
+        // if !sb.verify_checksum() {
+        // Err(anyhow!("Invalid superblock checksum"))
+        // } else {
+        Ok(sb)
+        // }
+    }
+
+    pub fn checksum(&mut self) {
+        self.checksum = self.calculate_checksum();
+    }
+
+    pub fn calculate_checksum(&self) -> u32 {
+        let mut hasher = Hasher::new();
+        hasher.update(&bincode::serialize(&self).unwrap());
+        hasher.finalize()
+    }
+
+    pub fn verify_checksum(&mut self) -> bool {
+        let checksum = self.checksum;
+        self.checksum = 0;
+        let ok = checksum == self.calculate_checksum();
+        self.checksum = checksum;
+
+        ok
+    }
+
+    pub fn clear_suid_sgid(&mut self) {
+        self.mode &= !libc::S_ISUID;
+
+        if self.mode & libc::S_IXGRP != 0 {
+            self.mode &= !libc::S_ISGID;
         }
     }
 }

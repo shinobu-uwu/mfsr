@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use fuser::MountOption;
 use libparted::Device;
 
 use crate::{
@@ -21,7 +22,7 @@ where
     P: AsRef<Path>,
 {
     let device = Device::new(&path)?;
-    let device_size = device.length() * device.phys_sector_size();
+    let device_size = device.length() * 512; // libparted will return the size in 512 bytes sectors
 
     if device.phys_sector_size() > block_size as u64 {
         return Err(anyhow!("The specified block size must be bigger than the device's cluster (physical block size), block size: {}, cluster size: {}", block_size, device.phys_sector_size()));
@@ -59,7 +60,7 @@ where
     P: AsRef<Path>,
 {
     let fs = Mfsr::new(source)?;
-    fuser::mount2(fs, mount_point, &[])?;
+    fuser::mount2(fs, mount_point, &[MountOption::AllowOther])?;
 
     Ok(())
 }

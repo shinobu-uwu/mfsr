@@ -223,6 +223,7 @@ dependencies = [
  "memchr",
  "page_size",
  "pkg-config",
+ "serde",
  "smallvec",
  "zerocopy",
 ]
