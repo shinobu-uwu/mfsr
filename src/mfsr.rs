@@ -1,11 +1,11 @@
 use std::{
-    mem::size_of,
     collections::BTreeMap,
     ffi::OsStr,
     fs::{File, OpenOptions},
-    io::{BufWriter, Write, Cursor},
+    io::{BufWriter, Cursor, Read, Seek, Write},
+    mem::size_of,
     path::Path,
-    time::{Duration, SystemTime}, mem::size_of,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -13,11 +13,14 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
 };
 use libc::{EEXIST, EINVAL, ENOENT};
-use memmap2::MmapMut;
+use libparted::Device;
+use memmap2::{MmapMut, MmapOptions};
 
-use crate::{
-    types::{block_group::BlockGroup, super_block::SuperBlock, inode::Inode},
-};
+use crate::{types::{
+    block_group::BlockGroup,
+    inode::Inode,
+    super_block::{self, SuperBlock},
+}, utils::{current_timestamp, system_time_to_timestamp, get_data_block_size, get_block_group_size}};
 
 #[derive(Debug)]
 pub struct Mfsr {
@@ -28,44 +31,104 @@ pub struct Mfsr {
 }
 
 impl Mfsr {
-    pub fn new<P>(mount_point: P) -> Result<Self>
+    pub fn new<P>(source: P) -> Result<Self>
     where
         P: AsRef<Path>,
     {
-        let device = OpenOptions::new().write(true).read(true).open(&mount_point)?;
-        let io_map = unsafe { MmapMut::map_mut(&device)? };
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(source)?;
+        let mut buf = [0; size_of::<SuperBlock>()];
+        file.read_exact(&mut buf)?;
+        let cursor = Cursor::new(&buf);
+        let super_block = SuperBlock::deserialize_from(cursor)?;
+        let size = get_block_group_size(super_block.block_size) * super_block.block_group_count;
+        file.rewind()?;
+        let io_map = unsafe {
+            MmapOptions::new()
+                .len(size as usize)
+                .map_mut(&file)?
+        };
         let mut cursor = Cursor::new(&io_map);
-        let super_block = SuperBlock::deserialize_from(&mut cursor)?;
-        let block_groups = BlockGroup::deserialize_from(cursor, super_block.block_size, super_block.block_group_count as usize)?;
+        let block_groups = BlockGroup::deserialize_from(
+            &mut cursor,
+            super_block.block_size,
+            super_block.block_group_count as usize,
+        )?;
 
-        Ok(Self {
-            io_map,
-            block_groups,
+        let mut fs = Self {
             super_block,
+            block_groups,
+            io_map,
             next_fh: 1,
-        })
+        };
+
+        fs.create_root()?;
+
+        Ok(fs)
     }
 
     fn create_root(&mut self) -> anyhow::Result<()> {
         if self.inode_exists(1) {
             Ok(())
         } else {
-            self.create_inode(1, todo!())
+            self.create_inode(Inode {
+                id: 1,
+                directory_entries: BTreeMap::new(),
+                open_file_handles: 0,
+                size: 0,
+                creation_time: current_timestamp(),
+                last_accessed: current_timestamp(),
+                last_modified: system_time_to_timestamp(UNIX_EPOCH),
+                last_metadata_changed: current_timestamp(),
+                kind: FileType::Directory,
+                mode: 777,
+                hard_links: 0,
+                uid: 0,
+                gid: 0,
+                block_count: 0,
+                rdev: 0,
+                flags: 0,
+                extended_attributes: BTreeMap::new(),
+                direct_blocks: [0; 12],
+                indirect_block: 0,
+                double_indirect_block: 0,
+                checksum: 0,
+            })?;
+            Ok(())
         }
     }
 
-    fn inode_exists(&mut self, inode_id: u64) -> bool {
-        let group_id = (inode_id / self.super_block.block_size as u64 - 1) as usize;
-        let group = self.block_groups[group_id];
+    fn inode_exists(&self, inode_id: u64) -> bool {
+        let group_id = (inode_id / self.super_block.block_size as u64) as usize;
+        let group = &self.block_groups[group_id];
+        let bitmap_byte_index = (inode_id % self.super_block.block_size as u64) / 8;
+        let bitmap_bit_index = (inode_id % 8) as usize - 1;
+
+        if bitmap_byte_index >= group.inode_bitmap.len() as u64 {
+            return false;
+        }
+
+        let bitmap_byte = group.inode_bitmap[bitmap_byte_index as usize];
+        let mask = 1 << bitmap_bit_index;
+
+        (bitmap_byte & mask) != 0
     }
 
     fn get_inode(&mut self, inode_id: u64) -> Option<Inode> {
-
         todo!()
     }
 
-    fn create_inode(&self, arg: i32, inode: Inode) -> std::result::Result<(), anyhow::Error> {
-        todo!()
+    fn create_inode(&mut self, inode: Inode) -> anyhow::Result<()> {
+        let inode_id = inode.id;
+        let group_id = (inode_id / self.super_block.block_size as u64) as usize;
+        let group = &mut self.block_groups[group_id];
+        let bitmap_byte_index = (inode_id % self.super_block.block_size as u64) / 8;
+        let bitmap_bit_index = (inode_id % 8) as usize - 1;
+        group.inode_bitmap[bitmap_byte_index as usize] |= 1 << bitmap_bit_index;
+        Ok(())
     }
 
     // fn next_inode_id(&self) -> Option<u64> {
@@ -113,26 +176,24 @@ impl Mfsr {
 }
 
 impl Filesystem for Mfsr {
-    // fn init(
-    //     &mut self,
-    //     req: &Request<'_>,
-    //     _config: &mut fuser::KernelConfig,
-    // ) -> Result<(), libc::c_int> {
-    //     self.super_block.update_last_mounted();
-    //     self.super_block.uid = req.uid();
-    //     self.super_block.gid = req.gid();
-    //
-    //     Ok(())
-    // }
-    //
-    // fn destroy(&mut self) {
-    //     let buf = self.io_map.as_mut();
-    //     let mut writer = BufWriter::new(buf);
-    //
-    //     self.super_block.serialize_into(&mut writer).unwrap();
-    //     writer.flush().unwrap();
-    // }
-    //
+    fn init(
+        &mut self,
+        req: &Request<'_>,
+        _config: &mut fuser::KernelConfig,
+    ) -> Result<(), libc::c_int> {
+        self.super_block.update_last_mounted();
+        self.super_block.uid = req.uid();
+        self.super_block.gid = req.gid();
+
+        Ok(())
+    }
+
+    fn destroy(&mut self) {
+        let buf = self.io_map.as_mut();
+        let mut cursor = Cursor::new(buf);
+        BlockGroup::serialize_into(&mut cursor, &self.block_groups, &mut self.super_block).unwrap();
+    }
+
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: fuser::ReplyStatfs) {
         reply.statfs(
             self.super_block.block_count,

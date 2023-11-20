@@ -50,8 +50,11 @@ impl BlockGroup {
         for i in 0..count {
             let offset = get_block_group_size(block_size) * i as u64 + block_size as u64;
             r.seek(SeekFrom::Start(offset))?;
-            let group: BlockGroup = bincode::deserialize_from(&mut r)?;
-            groups.push(group);
+            let mut data_bitmap = vec![0; block_size as usize];
+            let mut inode_bitmap = vec![0; block_size as usize];
+            r.read_exact(&mut data_bitmap)?;
+            r.read_exact(&mut inode_bitmap)?;
+            groups.push(BlockGroup::new(data_bitmap, inode_bitmap));
         }
 
         Ok(groups)

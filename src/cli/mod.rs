@@ -1,7 +1,7 @@
 use std::{
     fs::OpenOptions,
-    io::{BufReader, BufWriter, Cursor, Read, Write},
-    mem::size_of,
+    io::{BufReader, BufWriter, Cursor, Read, Seek, Write},
+    mem::{size_of, size_of_val},
     path::{Path, PathBuf},
 };
 
@@ -55,18 +55,15 @@ pub fn mount<P>(source: PathBuf, mount_point: PathBuf) -> Result<()>
 where
     P: AsRef<Path>,
 {
-    let mut buf = 
-    let fs = Mfsr::new(mount_point);
-    // let fs = Mfsr::new(sb, disk)?;
-    // fuser::mount2(fs, directory, &[])?;
+    let fs = Mfsr::new(source)?;
+    fuser::mount2(fs, mount_point, &[])?;
 
     Ok(())
 }
 
 pub fn debug_disk(path: PathBuf) -> Result<()> {
     let mut disk = OpenOptions::new().read(true).open(path)?;
-    const SB_SIZE: usize = size_of::<SuperBlock>();
-    let mut buf = [0; SB_SIZE];
+    let mut buf = [0; size_of::<SuperBlock>()];
     disk.read_exact(&mut buf)?;
     let cursor = Cursor::new(buf);
     let sb = SuperBlock::deserialize_from(cursor)?; // the first group superblock

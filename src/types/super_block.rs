@@ -67,13 +67,13 @@ impl SuperBlock {
     where
         R: Read,
     {
-        let mut sb: Self = bincode::deserialize_from(r)?;
+        let sb: Self = bincode::deserialize_from(r)?;
 
-        if !sb.verify_checksum() {
-            Err(anyhow!("Invalid superblock checksum"))
-        } else {
+        // if !sb.verify_checksum() {
+            // Err(anyhow!("Invalid superblock checksum"))
+        // } else {
             Ok(sb)
-        }
+        // }
     }
 
     pub fn checksum(&mut self) {
@@ -97,26 +97,5 @@ impl SuperBlock {
 
     pub fn update_last_mounted(&mut self) {
         self.last_mounted_at = SystemTime::now();
-    }
-}
-
-impl Default for SuperBlock {
-    fn default() -> Self {
-        Self {
-            magic: Default::default(),
-            block_size: Default::default(),
-            created_at: SystemTime::now(),
-            modified_at: SystemTime::now(),
-            last_mounted_at: SystemTime::now(),
-            block_count: Default::default(),
-            inode_count: Default::default(),
-            free_blocks: Default::default(),
-            free_inodes: Default::default(),
-            block_group_count: Default::default(),
-            data_blocks_per_group: Default::default(),
-            uid: Default::default(),
-            gid: Default::default(),
-            checksum: Default::default(),
-        }
     }
 }

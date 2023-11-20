@@ -3,6 +3,8 @@ mod mfsr;
 mod types;
 mod utils;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Parser;
 use cli::{
@@ -19,6 +21,6 @@ fn main() -> Result<()> {
             block_size,
         } => mkfs(disk_path, block_size),
         Commands::Debug { disk_path } => debug_disk(disk_path),
-        Commands::Mount { source, directory } => mount(source, directory),
+        Commands::Mount { source, directory } => mount::<PathBuf>(source, directory),
     }
 }
