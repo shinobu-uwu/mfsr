@@ -1,26 +1,21 @@
 use std::{
     collections::BTreeMap,
-    ffi::OsStr,
-    fs::{File, OpenOptions},
-    io::{BufWriter, Cursor, Read, Seek, Write},
+    fs::OpenOptions,
+    io::{Cursor, Read, Seek},
     mem::size_of,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::Result;
-use fuser::{
-    FileAttr, FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
-};
-use libc::{EEXIST, EINVAL, ENOENT};
-use libparted::Device;
+use fuser::{FileType, Filesystem, Request};
+
 use memmap2::{MmapMut, MmapOptions};
 
-use crate::{types::{
-    block_group::BlockGroup,
-    inode::Inode,
-    super_block::{self, SuperBlock},
-}, utils::{current_timestamp, system_time_to_timestamp, get_data_block_size, get_block_group_size}};
+use crate::{
+    types::{block_group::BlockGroup, inode::Inode, super_block::SuperBlock},
+    utils::{current_timestamp, get_block_group_size, system_time_to_timestamp},
+};
 
 #[derive(Debug)]
 pub struct Mfsr {
@@ -46,11 +41,7 @@ impl Mfsr {
         let super_block = SuperBlock::deserialize_from(cursor)?;
         let size = get_block_group_size(super_block.block_size) * super_block.block_group_count;
         file.rewind()?;
-        let io_map = unsafe {
-            MmapOptions::new()
-                .len(size as usize)
-                .map_mut(&file)?
-        };
+        let io_map = unsafe { MmapOptions::new().len(size as usize).map_mut(&file)? };
         let mut cursor = Cursor::new(&io_map);
         let block_groups = BlockGroup::deserialize_from(
             &mut cursor,
@@ -117,7 +108,7 @@ impl Mfsr {
         (bitmap_byte & mask) != 0
     }
 
-    fn get_inode(&mut self, inode_id: u64) -> Option<Inode> {
+    fn get_inode(&mut self, _inode_id: u64) -> Option<Inode> {
         todo!()
     }
 

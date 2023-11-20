@@ -28,7 +28,7 @@ impl BlockGroup {
         let block_size = super_block.block_size;
 
         for (i, g) in groups.iter().enumerate() {
-            let offset = get_block_group_size(block_size as u32) * i as u64;
+            let offset = get_block_group_size(block_size) * i as u64;
             let mut w_ref = w.by_ref();
             w_ref.seek(SeekFrom::Start(offset))?;
             super_block.serialize_into(&mut w_ref)?;

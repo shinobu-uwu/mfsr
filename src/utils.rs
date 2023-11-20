@@ -1,11 +1,8 @@
 use std::{
     mem::size_of,
-    process::Command,
-    str::from_utf8,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Result};
 use fuser::TimeOrNow;
 
 use crate::types::inode::Inode;

@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use crc32fast::Hasher;
 use libc::{gid_t, uid_t};
 use serde::{Deserialize, Serialize};
@@ -70,9 +70,9 @@ impl SuperBlock {
         let sb: Self = bincode::deserialize_from(r)?;
 
         // if !sb.verify_checksum() {
-            // Err(anyhow!("Invalid superblock checksum"))
+        // Err(anyhow!("Invalid superblock checksum"))
         // } else {
-            Ok(sb)
+        Ok(sb)
         // }
     }
 

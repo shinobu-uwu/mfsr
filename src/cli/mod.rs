@@ -1,8 +1,8 @@
 use std::{
     fs::OpenOptions,
-    io::{BufReader, BufWriter, Cursor, Read, Seek, Write},
-    mem::{size_of, size_of_val},
-    path::{Path, PathBuf},
+    io::{BufWriter, Cursor, Read, Write},
+    mem::size_of,
+    path::Path,
 };
 
 use anyhow::{anyhow, Result};
@@ -16,7 +16,10 @@ use crate::{
 
 pub mod args;
 
-pub fn mkfs(path: PathBuf, block_size: u32) -> Result<()> {
+pub fn mkfs<P>(path: P, block_size: u32) -> Result<()>
+where
+    P: AsRef<Path>,
+{
     let device = Device::new(&path)?;
     let device_size = device.length() * device.phys_sector_size();
 
@@ -51,7 +54,7 @@ pub fn mkfs(path: PathBuf, block_size: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn mount<P>(source: PathBuf, mount_point: PathBuf) -> Result<()>
+pub fn mount<P>(source: P, mount_point: P) -> Result<()>
 where
     P: AsRef<Path>,
 {
@@ -61,7 +64,10 @@ where
     Ok(())
 }
 
-pub fn debug_disk(path: PathBuf) -> Result<()> {
+pub fn debug_disk<P>(path: P) -> Result<()>
+where
+    P: AsRef<Path>,
+{
     let mut disk = OpenOptions::new().read(true).open(path)?;
     let mut buf = [0; size_of::<SuperBlock>()];
     disk.read_exact(&mut buf)?;
