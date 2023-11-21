@@ -1,10 +1,11 @@
 use std::{
-    ffi::OsStr,
-    fs::{File, OpenOptions},
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    fs::{DirEntry, File, OpenOptions},
     io::{BufRead, BufReader, Cursor, Read, Seek},
     mem::size_of,
     path::Path,
-    time::{Duration, SystemTime}, os::unix::prelude::OsStrExt,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::Result;
@@ -13,7 +14,10 @@ use fuser::{
     FUSE_ROOT_ID,
 };
 
-use libc::{c_int, EACCES, EEXIST, EFBIG, EIO, ENAMETOOLONG, ENOENT, S_ISGID, S_ISUID, W_OK, X_OK, R_OK};
+use libc::{
+    c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, R_OK, S_ISGID, S_ISUID, W_OK,
+    X_OK,
+};
 use memmap2::{MmapMut, MmapOptions};
 
 use crate::{
@@ -36,6 +40,7 @@ pub struct Mfsr {
     super_block: SuperBlock,
     io_map: MmapMut,
     block_groups: Vec<BlockGroup>,
+    dentry: BTreeMap<u64, BTreeMap<OsString, u64>>,
     next_fh: u64,
 }
 
@@ -68,6 +73,7 @@ impl Mfsr {
             block_groups,
             io_map,
             next_fh: 1,
+            dentry: BTreeMap::new(),
         };
 
         fs.create_root()?;
@@ -109,6 +115,17 @@ impl Mfsr {
         }
 
         return access_mask == 0;
+    }
+
+    fn create_dentry(&mut self, parent_id: u64, name: &OsStr, inode_id: u64) {
+        let entries = self.dentry.entry(parent_id).or_insert(BTreeMap::new());
+        entries.insert(name.to_owned(), inode_id);
+    }
+
+    fn delete_dentry(&mut self, parent_id: u64, name: &OsStr) {
+        if let Some(entries) = self.dentry.get_mut(&parent_id) {
+            entries.remove(name);
+        }
     }
 
     fn parse_flags(&self, flags: i32) -> Result<(c_int, bool, bool), c_int> {
@@ -217,14 +234,19 @@ impl Mfsr {
     }
 
     fn lookup_inode(&mut self, parent_id: u64, name: &OsStr) -> Option<Inode> {
-        match self.get_inode(parent_id) {
-            Some(inode) => match inode.directory_entries.get(name.to_str().unwrap()) {
-                Some(id) => self.get_inode(*id),
-                None => None,
-            },
-            None => None,
+        if let Some(parent_inode) = self.get_inode(parent_id) {
+            if let Some(child_id) = self
+                .dentry
+                .get(&parent_inode.id)
+                .and_then(|entries| entries.get(name))
+            {
+                return self.get_inode(*child_id);
+            }
         }
+
+        None
     }
+
     fn next_inode_id(&self) -> u64 {
         for (group_id, group) in self.block_groups.iter().enumerate() {
             for (byte_index, byte) in group.inode_bitmap.iter().enumerate() {
@@ -690,11 +712,9 @@ impl Filesystem for Mfsr {
             0,
         );
         new_inode.hard_links = 2;
+        self.create_dentry(parent, name, new_inode.id);
         parent_inode.last_modified = current_timestamp();
         parent_inode.last_metadata_changed = current_timestamp();
-        parent_inode
-            .directory_entries
-            .insert(name.to_str().unwrap().to_string(), new_inode.id);
 
         match self.write_inode(&mut parent_inode) {
             Ok(_) => {}
@@ -722,17 +742,47 @@ impl Filesystem for Mfsr {
     fn write(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
-        _offset: i64,
-        _data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        write_flags: u32,
+        flags: i32,
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        dbg!(self);
-        reply.written(100);
+        if !self.check_file_handle_write(fh) {
+            reply.error(EACCES);
+            return;
+        }
+
+        let inode = match self.get_inode(ino) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        let mmap = self.io_map.as_mut();
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+        reply: fuser::ReplyData,
+    ) {
+        if !self.check_file_handle_read(fh) {
+            reply.error(EACCES);
+            return;
+        }
+
+        let mmap = self.io_map.as_mut();
     }
 
     fn flush(
@@ -775,36 +825,15 @@ impl Filesystem for Mfsr {
         }
     }
 
-fn readdir(
-    &mut self,
-    req: &Request<'_>,
-    ino: u64,
-    _fh: u64,
-    offset: i64,
-    mut reply: ReplyDirectory,
-) {
-    let inode = match self.get_inode(ino) {
-        Some(i) => i,
-        None => {
-            reply.error(ENOENT);
-            return;
-        }
-    };
-
-    if self.check_access(inode.uid, inode.gid, inode.mode as u16, req.uid(), req.gid(), R_OK) {
-        reply.error(EACCES);
-        return;
-    }
-
-    // Ensure offset is within bounds
-    if offset < 0 {
-        reply.error(EINVAL);
-        return;
-    }
-
-    for (index, entry) in inode.directory_entries.iter().skip(offset as usize).enumerate() {
-        let (name, inode_id) = entry;
-        let inode = match self.get_inode(*inode_id) {
+    fn readdir(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let inode = match self.get_inode(ino) {
             Some(i) => i,
             None => {
                 reply.error(ENOENT);
@@ -812,21 +841,56 @@ fn readdir(
             }
         };
 
-        let buffer_full = reply.add(
-            *inode_id,
-            offset + index as i64 + 1,
-            inode.kind,
-            OsStr::from_bytes(name.as_bytes()),
-        );
-
-        if buffer_full {
-            // The buffer is full, so we should stop adding entries
-            break;
+        if !self.check_access(
+            inode.uid,
+            inode.gid,
+            inode.mode as u16,
+            req.uid(),
+            req.gid(),
+            R_OK,
+        ) {
+            reply.error(EACCES);
+            return;
         }
-    }
 
-    reply.ok();
-}
+        // Ensure offset is within bounds
+        if offset < 0 {
+            reply.error(EINVAL);
+            return;
+        }
+
+        // Clone the directory entries for the given inode
+        let dir_entries = match self.dentry.get(&ino).cloned() {
+            Some(entries) => entries,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Iterate over cloned directory entries starting from the specified offset
+        for (index, entry) in dir_entries.iter().skip(offset as usize).enumerate() {
+            let (name, inode_id) = entry;
+            let child_inode = match self.get_inode(*inode_id) {
+                Some(i) => i,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            // Add the directory entry to the FUSE reply
+            let buffer_full =
+                reply.add(*inode_id, offset + index as i64 + 1, child_inode.kind, name);
+
+            if buffer_full {
+                // The buffer is full, so we should stop adding entries
+                break;
+            }
+        }
+
+        reply.ok();
+    }
 
     fn releasedir(
         &mut self,
@@ -912,9 +976,7 @@ fn readdir(
             req.gid(),
             flags as u32,
         );
-        parent_inode
-            .directory_entries
-            .insert(name.to_str().unwrap().to_string(), new_inode.id);
+        self.create_dentry(parent, name, new_inode.id);
         parent_inode.last_modified = current_timestamp();
         parent_inode.last_metadata_changed = current_timestamp();
 
@@ -957,7 +1019,7 @@ fn readdir(
             req.gid(),
             libc::W_OK,
         ) {
-            reply.error(libc::EACCES);
+            reply.error(EACCES);
             return;
         }
 
@@ -968,12 +1030,12 @@ fn readdir(
             && uid != parent_inode.uid
             && uid != parent_inode.uid
         {
-            reply.error(libc::EACCES);
+            reply.error(EACCES);
             return;
         }
 
-        let inode_id = match parent_inode.directory_entries.get(name.to_str().unwrap()) {
-            Some(id) => *id,
+        let inode_id = match self.lookup_inode(parent, name) {
+            Some(i) => i.id,
             None => {
                 reply.error(ENOENT);
                 return;
@@ -981,12 +1043,12 @@ fn readdir(
         };
 
         self.delete_inode(inode_id);
-        parent_inode.directory_entries.remove(name.to_str().unwrap());
+        self.delete_dentry(parent, name);
         parent_inode.last_metadata_changed = current_timestamp();
         parent_inode.last_modified = current_timestamp();
 
         match self.write_inode(&mut parent_inode) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(_) => {
                 reply.error(EIO);
                 return;

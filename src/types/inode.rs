@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io::Read, io::Write};
+use std::{io::Read, io::Write};
 
 use anyhow::Result;
 use crc32fast::Hasher;
@@ -13,7 +13,6 @@ use super::super_block::SuperBlock;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Inode {
     pub id: u64,
-    pub directory_entries: BTreeMap<String, u64>,
     pub size: u64,
     pub creation_time: u64,
     pub last_accessed: u64,
@@ -27,7 +26,6 @@ pub struct Inode {
     pub block_count: u64,
     pub rdev: u32,
     pub flags: u32,
-    pub extended_attributes: BTreeMap<String, String>,
     pub direct_blocks: [u64; 12],
     pub indirect_block: u64,
     pub double_indirect_block: u64,
@@ -43,7 +41,6 @@ impl Inode {
             uid,
             gid,
             flags,
-            directory_entries: BTreeMap::new(),
             size: 0,
             creation_time: current_timestamp(),
             last_accessed: current_timestamp(),
@@ -52,7 +49,6 @@ impl Inode {
             hard_links: 1,
             block_count: 0,
             rdev: 0,
-            extended_attributes: BTreeMap::new(),
             direct_blocks: [0; 12],
             indirect_block: 0,
             double_indirect_block: 0,
