@@ -4,23 +4,26 @@ use std::{
     io::{BufRead, BufReader, Cursor, Read, Seek},
     mem::size_of,
     path::Path,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime}, os::unix::prelude::OsStrExt,
 };
 
 use anyhow::Result;
-use fuser::{FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, TimeOrNow, FUSE_ROOT_ID};
+use fuser::{
+    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, TimeOrNow,
+    FUSE_ROOT_ID,
+};
 
-use libc::{c_int, EACCES, EEXIST, ENAMETOOLONG, ENOENT, W_OK, EIO, EFBIG, S_ISUID, S_ISGID};
+use libc::{c_int, EACCES, EEXIST, EFBIG, EIO, ENAMETOOLONG, ENOENT, S_ISGID, S_ISUID, W_OK, X_OK, R_OK};
 use memmap2::{MmapMut, MmapOptions};
 
 use crate::{
     types::{block_group::BlockGroup, inode::Inode, super_block::SuperBlock},
     utils::{
-        current_timestamp, get_block_group_size, time_or_now_to_timestamp, system_time_to_timestamp,
+        current_timestamp, get_block_group_size, system_time_to_timestamp, time_or_now_to_timestamp,
     },
 };
 
-const FILE_ATTR_TTL: Duration = Duration::from_secs(1);
+const FILE_ATTR_TTL: Duration = Duration::new(0, 0);
 const MAX_NAME_LENGTH: usize = 255;
 const FMODE_EXEC: i32 = 0x20;
 const FILE_HANDLE_READ_BIT: u64 = 1 << 63;
@@ -115,6 +118,10 @@ impl Mfsr {
                     return Err(EACCES);
                 }
 
+                if flags & FMODE_EXEC != 0 {
+                    return Ok((X_OK, true, false));
+                }
+
                 Ok((libc::R_OK, true, false))
             }
             libc::O_WRONLY => Ok((libc::W_OK, false, true)),
@@ -182,15 +189,22 @@ impl Mfsr {
         Ok(())
     }
 
+    fn delete_inode(&mut self, inode_id: u64) {
+        let (group_id, bitmap_byte_index, bitmap_bit_index) = self.inode_bitmap_offset(inode_id);
+        let group = &mut self.block_groups[group_id as usize];
+        group.inode_bitmap[bitmap_byte_index as usize] &= !(1 << bitmap_bit_index);
+        self.super_block.free_inodes += 1;
+    }
+
     fn inode_bitmap_offset(&self, inode_id: u64) -> (usize, usize, usize) {
         let group_offset = inode_id / self.super_block.block_size as u64;
-        let byte_offset = (inode_id - 1) + group_offset * self.super_block.block_size as u64 / 8;
+        let byte_offset = ((inode_id - 1) - group_offset * self.super_block.block_size as u64) / 8;
         let bit_offset = (inode_id - 1) % 8;
 
         (
             group_offset as usize,
             byte_offset as usize,
-            bit_offset as usize
+            bit_offset as usize,
         )
     }
 
@@ -204,7 +218,7 @@ impl Mfsr {
 
     fn lookup_inode(&mut self, parent_id: u64, name: &OsStr) -> Option<Inode> {
         match self.get_inode(parent_id) {
-            Some(inode) => match inode.directory_entries.get(name) {
+            Some(inode) => match inode.directory_entries.get(name.to_str().unwrap()) {
                 Some(id) => self.get_inode(*id),
                 None => None,
             },
@@ -215,10 +229,11 @@ impl Mfsr {
         for (group_id, group) in self.block_groups.iter().enumerate() {
             for (byte_index, byte) in group.inode_bitmap.iter().enumerate() {
                 for bit_index in 0..8 {
-                    let mask = 1 << bit_index;
-
-                    if byte & mask == 0 {
-                        return (group_id as u64 * self.super_block.block_size as u64) + (byte_index as u64 * 8) + bit_index as u64 + 1;
+                    if byte >> bit_index & 1 == 0 {
+                        return (group_id as u64 * self.super_block.block_size as u64)
+                            + (byte_index as u64 * 8)
+                            + bit_index as u64
+                            + 1;
                     }
                 }
             }
@@ -264,19 +279,32 @@ impl Mfsr {
     }
 
     fn check_file_handle_write(&self, fh: u64) -> bool {
-        (fh & FILE_HANDLE_WRITE_BIT ) != 0
+        (fh & FILE_HANDLE_WRITE_BIT) != 0
     }
 
     fn check_file_handle_read(&self, fh: u64) -> bool {
-        (fh & FILE_HANDLE_READ_BIT ) != 0
+        (fh & FILE_HANDLE_READ_BIT) != 0
     }
 
-    fn truncate_inode(&mut self, inode: &mut Inode, size: u64, uid: u32, gid: u32) -> std::result::Result<(), c_int> {
-         if size > MAX_FILE_SIZE {
+    fn truncate_inode(
+        &mut self,
+        inode: &mut Inode,
+        size: u64,
+        uid: u32,
+        gid: u32,
+    ) -> std::result::Result<(), c_int> {
+        if size > MAX_FILE_SIZE {
             return Err(EFBIG);
         }
 
-        if !self.check_access(inode.uid, inode.gid, inode.mode as u16, uid, gid, libc::W_OK) {
+        if !self.check_access(
+            inode.uid,
+            inode.gid,
+            inode.mode as u16,
+            uid,
+            gid,
+            libc::W_OK,
+        ) {
             return Err(EACCES);
         }
 
@@ -368,7 +396,7 @@ impl Filesystem for Mfsr {
             }
             inode.last_metadata_changed = current_timestamp();
             match self.write_inode(&mut inode) {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(_) => {
                     reply.error(EIO);
                     return;
@@ -417,7 +445,7 @@ impl Filesystem for Mfsr {
             }
             inode.last_metadata_changed = current_timestamp();
             match self.write_inode(&mut inode) {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(_) => {
                     reply.error(EIO);
                     return;
@@ -442,7 +470,9 @@ impl Filesystem for Mfsr {
                     reply.error(EACCES);
                     return;
                 }
-            } else if let Err(error_code) = self.truncate_inode(&mut inode, size, req.uid(), req.gid()) {
+            } else if let Err(error_code) =
+                self.truncate_inode(&mut inode, size, req.uid(), req.gid())
+            {
                 reply.error(error_code);
                 return;
             }
@@ -569,7 +599,7 @@ impl Filesystem for Mfsr {
         }
 
         match self.write_inode(&mut inode) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => {
                 reply.error(EIO);
                 return;
@@ -612,14 +642,14 @@ impl Filesystem for Mfsr {
     }
 
     fn mkdir(
-            &mut self,
-            req: &Request<'_>,
-            parent: u64,
-            name: &OsStr,
-            mut mode: u32,
-            _umask: u32,
-            reply: ReplyEntry,
-        ) {
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mut mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
         if !self.inode_exists(parent) {
             reply.error(ENOENT);
             return;
@@ -632,11 +662,17 @@ impl Filesystem for Mfsr {
 
         let mut parent_inode = self.get_inode(parent).unwrap();
 
-        if !self.check_access(parent_inode.uid, parent_inode.gid, parent_inode.mode as u16, req.uid(), req.gid(), W_OK) {
+        if !self.check_access(
+            parent_inode.uid,
+            parent_inode.gid,
+            parent_inode.mode as u16,
+            req.uid(),
+            req.gid(),
+            W_OK,
+        ) {
             reply.error(EACCES);
             return;
         }
-
 
         if req.uid() != 0 {
             mode &= !(S_ISUID | S_ISGID) as u32;
@@ -645,13 +681,23 @@ impl Filesystem for Mfsr {
             mode |= S_ISGID as u32;
         }
 
-        let mut new_inode = Inode::new(self.next_inode_id(), FileType::Directory, mode, req.uid(), req.gid(), 0);
+        let mut new_inode = Inode::new(
+            self.next_inode_id(),
+            FileType::Directory,
+            mode,
+            req.uid(),
+            req.gid(),
+            0,
+        );
+        new_inode.hard_links = 2;
         parent_inode.last_modified = current_timestamp();
         parent_inode.last_metadata_changed = current_timestamp();
-        parent_inode.directory_entries.insert(name.into(), new_inode.id);
+        parent_inode
+            .directory_entries
+            .insert(name.to_str().unwrap().to_string(), new_inode.id);
 
         match self.write_inode(&mut parent_inode) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => {
                 reply.error(EIO);
                 return;
@@ -659,14 +705,18 @@ impl Filesystem for Mfsr {
         }
 
         match self.write_inode(&mut new_inode) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(_) => {
                 reply.error(EIO);
                 return;
             }
         }
 
-        reply.entry(&FILE_ATTR_TTL, &new_inode.to_file_attr(&self.super_block), 0);
+        reply.entry(
+            &FILE_ATTR_TTL,
+            &new_inode.to_file_attr(&self.super_block),
+            0,
+        );
     }
 
     fn write(
@@ -725,26 +775,58 @@ impl Filesystem for Mfsr {
         }
     }
 
-    fn readdir(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
-        if let Some(parent_inode) = self.get_inode(ino) {
-            for (i, (name, id)) in parent_inode.directory_entries.iter().enumerate() {
-                if offset == 0 {
-                    let inode = self.get_inode(*id).unwrap();
-                    let _ = reply.add(*id, (i as i64) + 1, inode.kind, name);
-                }
-            }
-            reply.ok();
-        } else {
+fn readdir(
+    &mut self,
+    req: &Request<'_>,
+    ino: u64,
+    _fh: u64,
+    offset: i64,
+    mut reply: ReplyDirectory,
+) {
+    let inode = match self.get_inode(ino) {
+        Some(i) => i,
+        None => {
             reply.error(ENOENT);
+            return;
+        }
+    };
+
+    if self.check_access(inode.uid, inode.gid, inode.mode as u16, req.uid(), req.gid(), R_OK) {
+        reply.error(EACCES);
+        return;
+    }
+
+    // Ensure offset is within bounds
+    if offset < 0 {
+        reply.error(EINVAL);
+        return;
+    }
+
+    for (index, entry) in inode.directory_entries.iter().skip(offset as usize).enumerate() {
+        let (name, inode_id) = entry;
+        let inode = match self.get_inode(*inode_id) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let buffer_full = reply.add(
+            *inode_id,
+            offset + index as i64 + 1,
+            inode.kind,
+            OsStr::from_bytes(name.as_bytes()),
+        );
+
+        if buffer_full {
+            // The buffer is full, so we should stop adding entries
+            break;
         }
     }
+
+    reply.ok();
+}
 
     fn releasedir(
         &mut self,
@@ -830,12 +912,14 @@ impl Filesystem for Mfsr {
             req.gid(),
             flags as u32,
         );
-        parent_inode.directory_entries.insert(name.into(), new_inode.id);
+        parent_inode
+            .directory_entries
+            .insert(name.to_str().unwrap().to_string(), new_inode.id);
         parent_inode.last_modified = current_timestamp();
         parent_inode.last_metadata_changed = current_timestamp();
 
         match self.write_inode(&mut parent_inode) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(_) => {
                 reply.error(EIO);
                 return;
@@ -854,5 +938,61 @@ impl Filesystem for Mfsr {
             }
             Err(_) => reply.error(EIO),
         }
+    }
+
+    fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let mut parent_inode = match self.get_inode(parent) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if !self.check_access(
+            parent_inode.uid,
+            parent_inode.gid,
+            parent_inode.mode as u16,
+            req.uid(),
+            req.gid(),
+            libc::W_OK,
+        ) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        let uid = req.uid();
+
+        if parent_inode.mode & libc::S_ISVTX != 0 // sticky bit
+            && uid != 0
+            && uid != parent_inode.uid
+            && uid != parent_inode.uid
+        {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        let inode_id = match parent_inode.directory_entries.get(name.to_str().unwrap()) {
+            Some(id) => *id,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        self.delete_inode(inode_id);
+        parent_inode.directory_entries.remove(name.to_str().unwrap());
+        parent_inode.last_metadata_changed = current_timestamp();
+        parent_inode.last_modified = current_timestamp();
+
+        match self.write_inode(&mut parent_inode) {
+            Ok(()) => {},
+            Err(_) => {
+                reply.error(EIO);
+                return;
+            }
+        }
+
+        reply.ok();
     }
 }
