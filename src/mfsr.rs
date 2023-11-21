@@ -135,12 +135,10 @@ impl Mfsr {
     }
 
     fn inode_exists(&self, inode_id: u64) -> bool {
-        let group_id = (inode_id / self.super_block.block_size as u64) as usize;
+        let (group_id, bitmap_byte_index, bitmap_bit_index) = self.inode_bitmap_offset(inode_id);
         let group = &self.block_groups[group_id];
-        let bitmap_byte_index = (inode_id % self.super_block.block_size as u64) / 8;
-        let bitmap_bit_index = (inode_id % 8) as usize - 1;
 
-        if bitmap_byte_index >= group.inode_bitmap.len() as u64 {
+        if bitmap_byte_index >= group.inode_bitmap.len() {
             return false;
         }
 
@@ -185,14 +183,14 @@ impl Mfsr {
     }
 
     fn inode_bitmap_offset(&self, inode_id: u64) -> (usize, usize, usize) {
-        let group_id = inode_id / self.super_block.block_size as u64;
-        let bitmap_byte_index = (inode_id % self.super_block.block_size as u64) / 8;
-        let bitmap_bit_index = (inode_id % 8) as usize - 1;
+        let group_offset = inode_id / self.super_block.block_size as u64;
+        let byte_offset = (inode_id - 1) + group_offset * self.super_block.block_size as u64 / 8;
+        let bit_offset = (inode_id - 1) % 8;
 
         (
-            group_id as usize,
-            bitmap_byte_index as usize,
-            bitmap_bit_index,
+            group_offset as usize,
+            byte_offset as usize,
+            bit_offset as usize
         )
     }
 
@@ -214,23 +212,13 @@ impl Mfsr {
         }
     }
     fn next_inode_id(&self) -> u64 {
-        // Iterate through the inode bitmaps to find the first free inode
         for (group_id, group) in self.block_groups.iter().enumerate() {
-            for (byte_index, &byte) in group.inode_bitmap.iter().enumerate() {
+            for (byte_index, byte) in group.inode_bitmap.iter().enumerate() {
                 for bit_index in 0..8 {
-                    let inode_id = (group_id as u64 * self.super_block.block_size as u64)
-                        + (byte_index as u64 * 8)
-                        + (bit_index as u64)
-                        + 1;
-
-                    if inode_id > self.super_block.inode_count {
-                        return 0;
-                    }
-
                     let mask = 1 << bit_index;
 
                     if byte & mask == 0 {
-                        return inode_id;
+                        return (group_id as u64 * self.super_block.block_size as u64) + (byte_index as u64 * 8) + bit_index as u64 + 1;
                     }
                 }
             }
