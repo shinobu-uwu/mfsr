@@ -25,7 +25,7 @@ where
     let device_size = device.length() * 512; // libparted will return the size in 512 bytes sectors
 
     if device.phys_sector_size() > block_size as u64 {
-        return Err(anyhow!("The specified block size must be bigger than the device's cluster (physical block size), block size: {}, cluster size: {}", block_size, device.phys_sector_size()));
+        return Err(anyhow!("The specified cluster size must be bigger than the device's block size , block size: {}, cluster size: {}", block_size, device.phys_sector_size()));
     }
 
     let block_group_count = device_size / get_block_group_size(block_size);

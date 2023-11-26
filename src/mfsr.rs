@@ -1,8 +1,9 @@
 use std::{
+    cmp::min,
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    fs::{DirEntry, File, OpenOptions},
-    io::{BufRead, BufReader, Cursor, Read, Seek},
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write},
     mem::size_of,
     path::Path,
     time::{Duration, SystemTime},
@@ -13,6 +14,7 @@ use fuser::{
     FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, TimeOrNow,
     FUSE_ROOT_ID,
 };
+use itertools::Itertools;
 
 use libc::{
     c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, R_OK, S_ISGID, S_ISUID, W_OK,
@@ -23,7 +25,8 @@ use memmap2::{MmapMut, MmapOptions};
 use crate::{
     types::{block_group::BlockGroup, inode::Inode, super_block::SuperBlock},
     utils::{
-        current_timestamp, get_block_group_size, system_time_to_timestamp, time_or_now_to_timestamp,
+        current_timestamp, get_block_group_size, get_inode_table_size, system_time_to_timestamp,
+        time_or_now_to_timestamp,
     },
 };
 
@@ -280,6 +283,39 @@ impl Mfsr {
         fh
     }
 
+    fn next_free_data_block(&self) -> (usize, usize, usize) {
+        for (group_id, group) in self.block_groups.iter().enumerate() {
+            for (byte_index, byte) in group.data_bitmap.iter().enumerate() {
+                for bit_index in 0..8 {
+                    if byte >> bit_index & 1 == 0 {
+                        return (group_id, byte_index, bit_index);
+                    }
+                }
+            }
+        }
+
+        (0, 0, 0)
+    }
+
+    fn next_free_data_block_address(&self) -> u64 {
+        let block_size = self.super_block.block_size;
+        for (group_id, group) in self.block_groups.iter().enumerate() {
+            for (byte_index, byte) in group.data_bitmap.iter().enumerate() {
+                for bit_index in 0..8 {
+                    if byte >> bit_index & 1 == 0 {
+                        return group_id as u64 * get_block_group_size(block_size)
+                            + block_size as u64 * 3  // super block + data bitmap + inode bitmap
+                            + get_inode_table_size(block_size)
+                            + byte_index as u64 * 8
+                            + bit_index;
+                    }
+                }
+            }
+        }
+
+        0
+    }
+
     fn get_groups(&self, pid: u32) -> Vec<u32> {
         #[cfg(not(target_os = "macos"))]
         {
@@ -337,6 +373,15 @@ impl Mfsr {
         self.write_inode(inode).map_err(|_| EIO)?;
 
         Ok(())
+    }
+
+    fn clear_suid_gid(&self, inode: &mut Inode) {
+        inode.mode &= !libc::S_ISUID;
+
+        // SGID is only suppose to be cleared if XGRP is set
+        if inode.mode & libc::S_IXGRP != 0 {
+            inode.mode &= !libc::S_ISGID;
+        }
     }
 }
 
@@ -756,14 +801,47 @@ impl Filesystem for Mfsr {
             return;
         }
 
-        let inode = match self.get_inode(ino) {
+        let mut inode = match self.get_inode(ino) {
             Some(i) => i,
             None => {
                 reply.error(ENOENT);
                 return;
             }
         };
-        let mmap = self.io_map.as_mut();
+
+        let mut written = 0;
+        let mut direct_pointers = data.len() / self.super_block.block_size as usize;
+
+        if data.len() % self.super_block.block_size as usize != 0 {
+            direct_pointers += 1;
+        }
+
+        for i in 0..direct_pointers {
+            let address = self.next_free_data_block_address();
+            let (group_index, byte_index, bit_index) = self.next_free_data_block();
+
+            let data_offset_start = i * self.super_block.block_size as usize;
+            let data_offset_end = min((i + 1) * self.super_block.block_size as usize, data.len());
+
+            let mmap = self.io_map.as_mut();
+            let mut cursor = Cursor::new(mmap);
+            cursor.seek(SeekFrom::Start(address)).unwrap();
+            inode.direct_pointers[i] = address;
+
+            let write_slice = &data[data_offset_start..data_offset_end];
+
+            written += cursor.write(write_slice).unwrap();
+            self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
+        }
+
+        inode.size = written as u64;
+        inode.block_count = direct_pointers as u64;
+        inode.last_metadata_changed = current_timestamp();
+        inode.last_modified = current_timestamp();
+        self.clear_suid_gid(&mut inode);
+        self.write_inode(&mut inode).unwrap();
+
+        reply.written(written as u32);
     }
 
     fn read(
@@ -773,8 +851,8 @@ impl Filesystem for Mfsr {
         fh: u64,
         offset: i64,
         size: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
         if !self.check_file_handle_read(fh) {
@@ -782,7 +860,48 @@ impl Filesystem for Mfsr {
             return;
         }
 
-        let mmap = self.io_map.as_mut();
+        let mut inode = match self.get_inode(ino) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let mmap = self.io_map.as_ref();
+        let mut cursor = Cursor::new(mmap);
+
+        let mut result_buf = Vec::with_capacity(size as usize);
+
+        let start_block = (offset / self.super_block.block_size as i64) as usize;
+        let end_block = ((offset + size as i64 - 1) / self.super_block.block_size as i64) as usize;
+
+        for i in start_block..=end_block {
+            let direct_pointer = inode.direct_pointers[i];
+            let block_offset = (offset % self.super_block.block_size as i64) as usize;
+            let remaining_size = size - result_buf.len() as u32;
+            let block_size = min(
+                self.super_block.block_size as u64 - block_offset as u64,
+                remaining_size as u64,
+            ) as usize;
+
+            if block_offset > 0 {
+                // Skip the block_offset bytes in the block
+                cursor
+                    .seek(SeekFrom::Start(direct_pointer + block_offset as u64))
+                    .unwrap();
+            } else {
+                cursor.seek(SeekFrom::Start(direct_pointer)).unwrap();
+            }
+
+            let mut buf = vec![0; block_size];
+            cursor.read_exact(&mut buf).unwrap();
+            result_buf.extend_from_slice(&buf);
+        }
+
+        inode.last_accessed = current_timestamp();
+        self.write_inode(&mut inode).unwrap();
+        reply.data(&result_buf);
     }
 
     fn flush(

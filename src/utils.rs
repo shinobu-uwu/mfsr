@@ -35,17 +35,21 @@ pub fn time_or_now_to_timestamp(time_or_now: TimeOrNow) -> u64 {
 
 #[inline(always)]
 pub fn get_block_group_size(block_size: u32) -> u64 {
-    let inode_table_size = block_size * 8 * size_of::<Inode>() as u32;
-    let result = block_size // super block
-    + block_size // data bitmap
-    + block_size // inode bitmap
-    + inode_table_size
+    let result = block_size as u64 // super block
+    + block_size as u64 // data bitmap
+    + block_size as u64 // inode bitmap
+    + get_inode_table_size(block_size)
     + get_data_block_size(block_size);
 
     result as u64
 }
 
 #[inline(always)]
-pub fn get_data_block_size(block_size: u32) -> u32 {
-    block_size * 8 * block_size
+pub fn get_inode_table_size(block_size: u32) -> u64 {
+    block_size as u64 * 8 * size_of::<Inode>() as u64
+}
+
+#[inline(always)]
+pub fn get_data_block_size(block_size: u32) -> u64 {
+    block_size as u64 * 8 * block_size as u64
 }
