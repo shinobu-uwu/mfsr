@@ -16,3 +16,4 @@ crc32fast = "1.3.2"
 memmap2 = "0.9.0"
 libparted = "0.1.5"
 nix = {version = "0.27.1", features = ["mman"]}
+itertools = "0.12.0"

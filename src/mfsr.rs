@@ -14,7 +14,6 @@ use fuser::{
     FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, TimeOrNow,
     FUSE_ROOT_ID,
 };
-use itertools::Itertools;
 
 use libc::{
     c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, R_OK, S_ISGID, S_ISUID, W_OK,
@@ -35,7 +34,7 @@ const MAX_NAME_LENGTH: usize = 255;
 const FMODE_EXEC: i32 = 0x20;
 const FILE_HANDLE_READ_BIT: u64 = 1 << 63;
 const FILE_HANDLE_WRITE_BIT: u64 = 1 << 62;
-// with triple indirect pointers we can have file sizes up to 4 TiB
+// with triply indirect pointers we can have file sizes up to 4 TiB
 const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -283,31 +282,23 @@ impl Mfsr {
         fh
     }
 
-    fn next_free_data_block(&self) -> (usize, usize, usize) {
-        for (group_id, group) in self.block_groups.iter().enumerate() {
-            for (byte_index, byte) in group.data_bitmap.iter().enumerate() {
-                for bit_index in 0..8 {
-                    if byte >> bit_index & 1 == 0 {
-                        return (group_id, byte_index, bit_index);
-                    }
-                }
-            }
-        }
+    fn data_block_id_to_address(&self, block_id: u64) -> u64 {
+        let cluster_size = self.super_block.block_size as u64;
+        let group_id = block_id / self.super_block.block_size as u64;
+        let offset = (block_id - 1) - group_id * cluster_size;
 
-        (0, 0, 0)
+        group_id * get_block_group_size(self.super_block.block_size)
+            + cluster_size * 3 // super block + data bitmap + inode bitmap
+            + get_inode_table_size(cluster_size as u32)
+            + offset * cluster_size
     }
 
-    fn next_free_data_block_address(&self) -> u64 {
-        let block_size = self.super_block.block_size;
+    fn next_free_data_block(&self) -> u64 {
         for (group_id, group) in self.block_groups.iter().enumerate() {
             for (byte_index, byte) in group.data_bitmap.iter().enumerate() {
                 for bit_index in 0..8 {
                     if byte >> bit_index & 1 == 0 {
-                        return group_id as u64 * get_block_group_size(block_size)
-                            + block_size as u64 * 3  // super block + data bitmap + inode bitmap
-                            + get_inode_table_size(block_size)
-                            + byte_index as u64 * 8
-                            + bit_index;
+                        return group_id as u64 + byte_index as u64 + bit_index + 1;
                     }
                 }
             }
@@ -382,6 +373,18 @@ impl Mfsr {
         if inode.mode & libc::S_IXGRP != 0 {
             inode.mode &= !libc::S_ISGID;
         }
+    }
+
+    fn data_block_bitmap_offset(&self, block_id: u64) -> (usize, usize, usize) {
+        let group_offset = block_id / self.super_block.block_size as u64;
+        let byte_offset = ((block_id - 1) - group_offset * self.super_block.block_size as u64) / 8;
+        let bit_offset = (block_id - 1) % 8;
+
+        (
+            group_offset as usize,
+            byte_offset as usize,
+            bit_offset as usize,
+        )
     }
 }
 
@@ -791,8 +794,8 @@ impl Filesystem for Mfsr {
         fh: u64,
         offset: i64,
         data: &[u8],
-        write_flags: u32,
-        flags: i32,
+        _write_flags: u32,
+        _flags: i32,
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
@@ -810,32 +813,38 @@ impl Filesystem for Mfsr {
         };
 
         let mut written = 0;
-        let mut direct_pointers = data.len() / self.super_block.block_size as usize;
+        let start_block = (offset / self.super_block.block_size as i64) as usize;
 
-        if data.len() % self.super_block.block_size as usize != 0 {
-            direct_pointers += 1;
+        for (i, data_chunk) in data
+            .chunks(self.super_block.block_size as usize)
+            .enumerate()
+        {
+            if i < 12 {
+                let is_new_block = inode.direct_pointers[i + start_block] == 0;
+
+                let block_id = if is_new_block {
+                    self.next_free_data_block()
+                } else {
+                    inode.direct_pointers[i + start_block]
+                };
+
+                let address = self.data_block_id_to_address(block_id);
+                let (group_index, byte_index, bit_index) = self.data_block_bitmap_offset(block_id);
+                let mmap = self.io_map.as_mut();
+                let mut cursor = Cursor::new(mmap);
+                cursor.seek(SeekFrom::Start(address)).unwrap();
+                inode.direct_pointers[i + start_block] = block_id;
+                written += cursor.write(data_chunk).unwrap();
+                self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
+                inode.block_count += 1;
+            }
         }
 
-        for i in 0..direct_pointers {
-            let address = self.next_free_data_block_address();
-            let (group_index, byte_index, bit_index) = self.next_free_data_block();
-
-            let data_offset_start = i * self.super_block.block_size as usize;
-            let data_offset_end = min((i + 1) * self.super_block.block_size as usize, data.len());
-
-            let mmap = self.io_map.as_mut();
-            let mut cursor = Cursor::new(mmap);
-            cursor.seek(SeekFrom::Start(address)).unwrap();
-            inode.direct_pointers[i] = address;
-
-            let write_slice = &data[data_offset_start..data_offset_end];
-
-            written += cursor.write(write_slice).unwrap();
-            self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
+        let new_size = (offset + written as i64) as u64;
+        if new_size > inode.size {
+            inode.size = new_size;
         }
 
-        inode.size = written as u64;
-        inode.block_count = direct_pointers as u64;
         inode.last_metadata_changed = current_timestamp();
         inode.last_modified = current_timestamp();
         self.clear_suid_gid(&mut inode);
@@ -878,6 +887,7 @@ impl Filesystem for Mfsr {
 
         for i in start_block..=end_block {
             let direct_pointer = inode.direct_pointers[i];
+            let address = self.data_block_id_to_address(direct_pointer);
             let block_offset = (offset % self.super_block.block_size as i64) as usize;
             let remaining_size = size - result_buf.len() as u32;
             let block_size = min(
@@ -886,12 +896,11 @@ impl Filesystem for Mfsr {
             ) as usize;
 
             if block_offset > 0 {
-                // Skip the block_offset bytes in the block
                 cursor
-                    .seek(SeekFrom::Start(direct_pointer + block_offset as u64))
+                    .seek(SeekFrom::Start(address + block_offset as u64))
                     .unwrap();
             } else {
-                cursor.seek(SeekFrom::Start(direct_pointer)).unwrap();
+                cursor.seek(SeekFrom::Start(address)).unwrap();
             }
 
             let mut buf = vec![0; block_size];
@@ -1175,5 +1184,18 @@ impl Filesystem for Mfsr {
         }
 
         reply.ok();
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        todo!()
     }
 }
