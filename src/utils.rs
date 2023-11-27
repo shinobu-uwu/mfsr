@@ -53,3 +53,13 @@ pub fn get_inode_table_size(block_size: u32) -> u64 {
 pub fn get_data_block_size(block_size: u32) -> u64 {
     block_size as u64 * 8 * block_size as u64
 }
+
+#[inline(always)]
+pub fn bytes_to_pointers(chunk: &[u8]) -> u64 {
+    let mut result = 0u64;
+
+    for (i, &byte) in chunk.iter().enumerate() {
+        result |= (byte as u64) << (i * 8);
+    }
+    result
+}

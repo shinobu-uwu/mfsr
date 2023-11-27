@@ -11,8 +11,8 @@ use std::{
 
 use anyhow::Result;
 use fuser::{
-    Filesystem, FileType, FUSE_ROOT_ID, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
-    TimeOrNow,
+    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, TimeOrNow,
+    FUSE_ROOT_ID,
 };
 use libc::{
     c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, R_OK, S_ISGID, S_ISUID, W_OK,
@@ -24,7 +24,7 @@ use crate::{
     types::{block_group::BlockGroup, inode::Inode, super_block::SuperBlock},
     utils::{
         current_timestamp, get_block_group_size, get_inode_table_size, system_time_to_timestamp,
-        time_or_now_to_timestamp,
+        time_or_now_to_timestamp, bytes_to_pointers,
     },
 };
 
@@ -47,8 +47,8 @@ pub struct Mfsr {
 
 impl Mfsr {
     pub fn new<P>(source: P) -> Result<Self>
-        where
-            P: AsRef<Path>,
+    where
+        P: AsRef<Path>,
     {
         let mut file = OpenOptions::new()
             .read(true)
@@ -388,6 +388,28 @@ impl Mfsr {
             bit_offset as usize,
         )
     }
+
+    #[inline(always)]
+    fn write_data(&mut self, block_id: u64, data: &[u8]) -> Result<usize> {
+        let address = self.data_block_id_to_address(block_id);
+        let mut cursor = Cursor::new(self.io_map.as_mut());
+        cursor.seek(SeekFrom::Start(address))?;
+        cursor.write_all(data)?;
+        let (group_index, byte_index, bit_index) = self.data_block_bitmap_offset(block_id);
+        self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
+
+        Ok(data.len())
+    }
+
+    #[inline(always)]
+    fn read_data(&mut self, block_id: u64, buf: &mut [u8]) -> Result<()> {
+        let address = self.data_block_id_to_address(block_id);
+        let mut cursor = Cursor::new(self.io_map.as_ref());
+        cursor.seek(SeekFrom::Start(address))?;
+        cursor.read_exact(buf)?;
+
+        Ok(())
+    }
 }
 
 impl Filesystem for Mfsr {
@@ -558,13 +580,13 @@ impl Filesystem for Mfsr {
 
             if inode.uid != req.uid()
                 && !self.check_access(
-                inode.uid,
-                inode.gid,
-                inode.mode as u16,
-                req.uid(),
-                req.gid(),
-                libc::W_OK,
-            )
+                    inode.uid,
+                    inode.gid,
+                    inode.mode as u16,
+                    req.uid(),
+                    req.gid(),
+                    libc::W_OK,
+                )
             {
                 reply.error(EACCES);
                 return;
@@ -582,13 +604,13 @@ impl Filesystem for Mfsr {
 
             if inode.uid != req.uid()
                 && !self.check_access(
-                inode.uid,
-                inode.gid,
-                inode.mode as u16,
-                req.uid(),
-                req.gid(),
-                libc::W_OK,
-            )
+                    inode.uid,
+                    inode.gid,
+                    inode.mode as u16,
+                    req.uid(),
+                    req.gid(),
+                    libc::W_OK,
+                )
             {
                 reply.error(EACCES);
                 return;
@@ -606,13 +628,13 @@ impl Filesystem for Mfsr {
 
             if inode.uid != req.uid()
                 && !self.check_access(
-                inode.uid,
-                inode.gid,
-                inode.mode as u16,
-                req.uid(),
-                req.gid(),
-                libc::W_OK,
-            )
+                    inode.uid,
+                    inode.gid,
+                    inode.mode as u16,
+                    req.uid(),
+                    req.gid(),
+                    libc::W_OK,
+                )
             {
                 reply.error(EACCES);
                 return;
@@ -630,13 +652,13 @@ impl Filesystem for Mfsr {
 
             if inode.uid != req.uid()
                 && !self.check_access(
-                inode.uid,
-                inode.gid,
-                inode.mode as u16,
-                req.uid(),
-                req.gid(),
-                libc::W_OK,
-            )
+                    inode.uid,
+                    inode.gid,
+                    inode.mode as u16,
+                    req.uid(),
+                    req.gid(),
+                    libc::W_OK,
+                )
             {
                 reply.error(EACCES);
                 return;
@@ -654,13 +676,13 @@ impl Filesystem for Mfsr {
 
             if inode.uid != req.uid()
                 && !self.check_access(
-                inode.uid,
-                inode.gid,
-                inode.mode as u16,
-                req.uid(),
-                req.gid(),
-                libc::W_OK,
-            )
+                    inode.uid,
+                    inode.gid,
+                    inode.mode as u16,
+                    req.uid(),
+                    req.gid(),
+                    libc::W_OK,
+                )
             {
                 reply.error(EACCES);
                 return;
@@ -830,70 +852,65 @@ impl Filesystem for Mfsr {
                     inode.direct_pointers[i + start_block]
                 };
 
-                let address = self.data_block_id_to_address(block_id);
-                let (group_index, byte_index, bit_index) = self.data_block_bitmap_offset(block_id);
-                let mmap = self.io_map.as_mut();
-                let mut cursor = Cursor::new(mmap);
-                cursor.seek(SeekFrom::Start(address)).unwrap();
-                inode.direct_pointers[i + start_block] = block_id;
-                written += cursor.write(chunk).unwrap();
-                self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
-                inode.block_count += 1;
-            } else if i + start_block >= 12 {
-                if inode.indirect_pointer == 0 {
-                    let mut pointers = vec![0; self.super_block.block_count as usize / size_of::<u64>()];
-                    let indirect_block_id = self.next_free_data_block();
-                    let indirect_block_address = self.data_block_id_to_address(indirect_block_id);
-                    let (group_index, byte_index, bit_index) = self.data_block_bitmap_offset(indirect_block_id);
-                    self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
-                    let block_id = self.next_free_data_block();
-                    let block_address = self.data_block_id_to_address(block_id);
-                    let (group_index, byte_index, bit_index) = self.data_block_bitmap_offset(indirect_block_id);
-                    self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
-                    pointers[i + start_block - 12] = block_id;
-                    let mut cursor = Cursor::new(self.io_map.as_mut());
-                    cursor.seek(SeekFrom::Start(indirect_block_address)).unwrap();
-
-                    let mut buf = Vec::new();
-
-                    for &pointer in pointers.iter() {
-                        buf.extend_from_slice(&pointer.to_le_bytes());
-                    }
-
-                    cursor.write_all(&buf).unwrap();
-                    cursor.seek(SeekFrom::Start(block_address)).unwrap();
-                    cursor.write_all(chunk).unwrap();
-                    inode.indirect_pointer = indirect_block_id;
+                if self.write_data(block_id, chunk).is_err() {
+                    reply.error(EIO);
+                    return;
                 }
 
-                let mut cursor = Cursor::new(self.io_map.as_ref());
-                cursor.seek(SeekFrom::Start(self.data_block_id_to_address(inode.indirect_pointer))).unwrap();
+                inode.direct_pointers[i + start_block] = block_id;
+                written += chunk.len();
+                inode.block_count += 1;
+            } else if i + start_block >= 12
+                && i + start_block <= self.super_block.block_size as usize
+            {
+                if inode.indirect_pointer == 0 {
+                    let pointers = vec![0; self.super_block.block_size as usize];
+                    let indirect_block_id = self.next_free_data_block();
+
+                    if self.write_data(indirect_block_id, &pointers).is_err() {
+                        reply.error(EIO);
+                        return;
+                    }
+
+                    inode.indirect_pointer = indirect_block_id;
+
+                    if self.write_inode(&mut inode).is_err() {
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+
                 let mut buf = vec![0; self.super_block.block_size as usize];
-                cursor.read_exact(&mut buf).unwrap();
-                let mut pointers: Vec<u64> = buf.chunks_exact(8)
-                    .map(|chunk| {
-                        let mut result = 0u64;
-                        for (i, &byte) in chunk.iter().enumerate() {
-                            result |= (byte as u64) << (i * 8);
-                        }
-                        result
-                    })
+
+                if self.read_data(inode.indirect_pointer, &mut buf).is_err() {
+                    reply.error(EIO);
+                    return;
+                };
+
+                let mut pointers: Vec<u64> = buf
+                    .chunks_exact(8)
+                    .map(bytes_to_pointers)
                     .collect();
                 let block_id = self.next_free_data_block();
-                let block_address = self.data_block_id_to_address(block_id);
-                pointers[i + start_block - 12] = block_id;
-                let mut cursor = Cursor::new(self.io_map.as_mut());
-                cursor.seek(SeekFrom::Start(inode.indirect_pointer)).unwrap();
 
-                let mut buf = Vec::new();
+                if self.write_data(block_id, chunk).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+
+                pointers[i + start_block - 12] = block_id;
+                let mut buf = vec![0; self.super_block.block_size as usize];
 
                 for &pointer in pointers.iter() {
                     buf.extend_from_slice(&pointer.to_le_bytes());
                 }
 
-                cursor.write_all(&buf).unwrap();
-                cursor.seek(SeekFrom::Start(block_address)).unwrap();
-                cursor.write_all(chunk).unwrap();
+                if self.write_data(inode.indirect_pointer, buf.as_slice()).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+
+                written += chunk.len();
             }
         }
 
@@ -934,39 +951,48 @@ impl Filesystem for Mfsr {
             }
         };
 
-        let mmap = self.io_map.as_ref();
-        let mut cursor = Cursor::new(mmap);
-
         let mut result_buf = Vec::with_capacity(size as usize);
-
         let start_block = (offset / self.super_block.block_size as i64) as usize;
         let end_block = ((offset + size as i64 - 1) / self.super_block.block_size as i64) as usize;
 
         for i in start_block..=end_block {
-            let direct_pointer = inode.direct_pointers[i];
-            let address = self.data_block_id_to_address(direct_pointer);
-            let block_offset = (offset % self.super_block.block_size as i64) as usize;
-            let remaining_size = size - result_buf.len() as u32;
-            let block_size = min(
-                self.super_block.block_size as u64 - block_offset as u64,
-                remaining_size as u64,
-            ) as usize;
+            if i < 12 {
+                let direct_pointer = inode.direct_pointers[i];
+                let mut buf = vec![0; self.super_block.block_size as usize];
 
-            if block_offset > 0 {
-                cursor
-                    .seek(SeekFrom::Start(address + block_offset as u64))
-                    .unwrap();
-            } else {
-                cursor.seek(SeekFrom::Start(address)).unwrap();
+                if self.read_data(direct_pointer, &mut buf).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+
+                result_buf.extend_from_slice(buf.as_slice());
+            } else if i >= 12 && i < self.super_block.block_size as usize {
+                let mut buf = vec![0; self.super_block.block_size as usize];
+
+                if self.read_data(inode.indirect_pointer, &mut buf).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+
+                let pointers: Vec<u64> = buf.chunks_exact(8).map(bytes_to_pointers).collect();
+                let block_id = pointers[i - 12];
+
+                if self.read_data(block_id, &mut buf).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+
+                result_buf.extend_from_slice(&buf);
             }
-
-            let mut buf = vec![0; block_size];
-            cursor.read_exact(&mut buf).unwrap();
-            result_buf.extend_from_slice(&buf);
         }
 
         inode.last_accessed = current_timestamp();
-        self.write_inode(&mut inode).unwrap();
+
+        if self.write_inode(&mut inode).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
         reply.data(&result_buf);
     }
 
