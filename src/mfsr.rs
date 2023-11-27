@@ -1,5 +1,4 @@
 use std::{
-    cmp::min,
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
@@ -23,8 +22,8 @@ use memmap2::{MmapMut, MmapOptions};
 use crate::{
     types::{block_group::BlockGroup, inode::Inode, super_block::SuperBlock},
     utils::{
-        current_timestamp, get_block_group_size, get_inode_table_size, system_time_to_timestamp,
-        time_or_now_to_timestamp, bytes_to_pointers,
+        bytes_to_pointers, current_timestamp, get_block_group_size, get_inode_table_size,
+        pointer_to_bytes, system_time_to_timestamp, time_or_now_to_timestamp,
     },
 };
 
@@ -838,6 +837,7 @@ impl Filesystem for Mfsr {
 
         let mut written = 0;
         let start_block = (offset / self.super_block.block_size as i64) as usize;
+        let pointers_per_indirect_block = self.super_block.block_size as usize / size_of::<u64>();
 
         for (i, chunk) in data
             .chunks(self.super_block.block_size as usize)
@@ -860,9 +860,7 @@ impl Filesystem for Mfsr {
                 inode.direct_pointers[i + start_block] = block_id;
                 written += chunk.len();
                 inode.block_count += 1;
-            } else if i + start_block >= 12
-                && i + start_block <= self.super_block.block_size as usize
-            {
+            } else if i + start_block >= 12 && i + start_block <= pointers_per_indirect_block {
                 if inode.indirect_pointer == 0 {
                     let pointers = vec![0; self.super_block.block_size as usize];
                     let indirect_block_id = self.next_free_data_block();
@@ -887,11 +885,13 @@ impl Filesystem for Mfsr {
                     return;
                 };
 
-                let mut pointers: Vec<u64> = buf
-                    .chunks_exact(8)
-                    .map(bytes_to_pointers)
-                    .collect();
-                let block_id = self.next_free_data_block();
+                let mut pointers: Vec<u64> = buf.chunks_exact(8).map(bytes_to_pointers).collect();
+                let pointer = pointers[i + start_block - 12];
+                let block_id = if pointer == 0 {
+                    self.next_free_data_block()
+                } else {
+                    pointer
+                };
 
                 if self.write_data(block_id, chunk).is_err() {
                     reply.error(EIO);
@@ -899,18 +899,25 @@ impl Filesystem for Mfsr {
                 }
 
                 pointers[i + start_block - 12] = block_id;
-                let mut buf = vec![0; self.super_block.block_size as usize];
+                let mut buf = vec![];
 
-                for &pointer in pointers.iter() {
-                    buf.extend_from_slice(&pointer.to_le_bytes());
+                for pointer in pointers {
+                    let slice = pointer_to_bytes(pointer);
+                    buf.extend_from_slice(&slice);
                 }
 
-                if self.write_data(inode.indirect_pointer, buf.as_slice()).is_err() {
+                if self
+                    .write_data(inode.indirect_pointer, buf.as_slice())
+                    .is_err()
+                {
                     reply.error(EIO);
                     return;
                 }
 
                 written += chunk.len();
+            } else {
+                reply.error(EFBIG);
+                return;
             }
         }
 

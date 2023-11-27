@@ -63,3 +63,14 @@ pub fn bytes_to_pointers(chunk: &[u8]) -> u64 {
     }
     result
 }
+
+#[inline(always)]
+pub fn pointer_to_bytes(pointer: u64) -> [u8; 8] {
+    let mut bytes = [0u8; 8];
+
+    for i in 0..8 {
+        bytes[i] = ((pointer >> (8 * i)) & 0xFF) as u8;
+    }
+
+    bytes
+}
