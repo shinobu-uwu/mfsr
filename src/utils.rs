@@ -35,8 +35,6 @@ pub fn time_or_now_to_timestamp(time_or_now: TimeOrNow) -> u64 {
 
 #[inline(always)]
 pub fn get_block_group_size(block_size: u32) -> u64 {
-    
-
     block_size as u64 // super block
     + block_size as u64 // data bitmap
     + block_size as u64 // inode bitmap
@@ -96,4 +94,3 @@ pub fn u64_to_bytes(value: u64) -> [u8; 8] {
 
     result
 }
-

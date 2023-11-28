@@ -25,8 +25,7 @@ use crate::{
     },
     utils::{
         bytes_to_pointer, bytes_to_u64, current_timestamp, get_block_group_size,
-        get_inode_table_size, pointer_to_bytes, system_time_to_timestamp,
-        time_or_now_to_timestamp,
+        get_inode_table_size, pointer_to_bytes, system_time_to_timestamp, time_or_now_to_timestamp,
     },
 };
 
@@ -172,9 +171,7 @@ impl Mfsr {
         let offset = self.inode_table_offset(inode_id);
         let mmap = self.io_map.as_mut();
         let mut cursor = Cursor::new(mmap);
-        cursor
-            .seek(std::io::SeekFrom::Start(offset))
-            .unwrap();
+        cursor.seek(std::io::SeekFrom::Start(offset)).unwrap();
 
         Some(Inode::deserialize_from(&mut cursor).unwrap())
     }
@@ -1020,7 +1017,7 @@ impl Filesystem for Mfsr {
                         return;
                     }
                 }
-            }  else {
+            } else {
                 reply.error(EFBIG);
                 return;
             }
