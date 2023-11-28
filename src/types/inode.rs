@@ -28,8 +28,6 @@ pub struct Inode {
     pub flags: u32,
     pub direct_pointers: [u32; 12],
     pub indirect_pointer: u32,
-    pub doubly_indirect_pointer: u32,
-    pub triply_indirect_pointer: u32,
     pub checksum: u32,
 }
 
@@ -52,8 +50,6 @@ impl Inode {
             rdev: 0,
             direct_pointers: [0; 12],
             indirect_pointer: 0,
-            doubly_indirect_pointer: 0,
-            triply_indirect_pointer: 0,
             checksum: 0,
         }
     }

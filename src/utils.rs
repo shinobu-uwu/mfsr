@@ -55,7 +55,7 @@ pub fn get_data_block_size(block_size: u32) -> u64 {
 }
 
 #[inline(always)]
-pub fn bytes_to_pointers(chunk: &[u8]) -> u32 {
+pub fn bytes_to_pointer(chunk: &[u8]) -> u32 {
     let mut result = 0u32;
 
     for (i, &byte) in chunk.iter().enumerate() {
@@ -97,14 +97,3 @@ pub fn u64_to_bytes(value: u64) -> [u8; 8] {
     result
 }
 
-#[inline(always)]
-pub fn pointers_to_bytes(pointers: Vec<u32>) -> Vec<u8> {
-    let mut result = Vec::with_capacity(pointers.len() * std::mem::size_of::<u32>());
-
-    for &pointer in &pointers {
-        let pointer_bytes = pointer_to_bytes(pointer);
-        result.extend_from_slice(&pointer_bytes);
-    }
-
-    result
-}
