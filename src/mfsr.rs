@@ -13,8 +13,9 @@ use fuser::{
     FUSE_ROOT_ID,
 };
 use libc::{
-    c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOTEMPTY, RENAME_EXCHANGE,
-    R_OK, S_ISGID, S_ISUID, W_OK, X_OK,
+    c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOTEMPTY, EPERM, F_OK,
+    O_ACCMODE, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, RENAME_EXCHANGE, R_OK, S_ISGID, S_ISUID,
+    S_ISVTX, S_IXGRP, S_IXOTH, S_IXUSR, W_OK, X_OK,
 };
 use memmap2::{MmapMut, MmapOptions};
 
@@ -91,7 +92,7 @@ impl Mfsr {
         mut access_mask: i32,
     ) -> bool {
         // F_OK tests for existence of file
-        if access_mask == libc::F_OK {
+        if access_mask == F_OK {
             return true;
         }
         let file_mode = i32::from(file_mode);
@@ -99,7 +100,7 @@ impl Mfsr {
         // root is allowed to read & write anything
         if uid == 0 {
             // root only allowed to exec if one of the X bits is set
-            access_mask &= libc::X_OK;
+            access_mask &= X_OK;
             access_mask -= access_mask & (file_mode >> 6);
             access_mask -= access_mask & (file_mode >> 3);
             access_mask -= access_mask & file_mode;
@@ -118,9 +119,9 @@ impl Mfsr {
     }
 
     fn parse_flags(&self, flags: i32) -> Result<(c_int, bool, bool), c_int> {
-        match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => {
-                if flags & libc::O_TRUNC != 0 {
+        match flags & O_ACCMODE {
+            O_RDONLY => {
+                if flags & O_TRUNC != 0 {
                     return Err(EACCES);
                 }
 
@@ -128,11 +129,11 @@ impl Mfsr {
                     return Ok((X_OK, true, false));
                 }
 
-                Ok((libc::R_OK, true, false))
+                Ok((R_OK, true, false))
             }
-            libc::O_WRONLY => Ok((libc::W_OK, false, true)),
-            libc::O_RDWR => Ok((libc::R_OK | libc::W_OK, true, true)),
-            _ => Err(libc::EINVAL),
+            O_WRONLY => Ok((W_OK, false, true)),
+            O_RDWR => Ok((R_OK | W_OK, true, true)),
+            _ => Err(EINVAL),
         }
     }
 
@@ -211,6 +212,17 @@ impl Mfsr {
                 self.data_block_bitmap_offset(pointer);
             let group = &mut self.block_groups[group_id];
             group.data_bitmap[bitmap_byte_index] &= !(1 << bitmap_bit_index);
+        }
+
+        if inode.indirect_pointer != 0 {
+            let pointers = self.read_indirect_pointer(inode.indirect_pointer).unwrap();
+
+            for pointer in pointers {
+                if pointer != 0 {
+                    let (group_index, byte_index, bit_index) = self.inode_bitmap_offset(inode_id);
+                    self.block_groups[group_index].data_bitmap[byte_index] &= !(1 << bit_index);
+                }
+            }
         }
     }
 
@@ -348,14 +360,7 @@ impl Mfsr {
             return Err(EFBIG);
         }
 
-        if !self.check_access(
-            inode.uid,
-            inode.gid,
-            inode.mode as u16,
-            uid,
-            gid,
-            libc::W_OK,
-        ) {
+        if !self.check_access(inode.uid, inode.gid, inode.mode as u16, uid, gid, W_OK) {
             return Err(EACCES);
         }
 
@@ -369,11 +374,11 @@ impl Mfsr {
     }
 
     fn clear_suid_gid(&self, inode: &mut Inode) {
-        inode.mode &= !libc::S_ISUID;
+        inode.mode &= !S_ISUID;
 
         // SGID is only suppose to be cleared if XGRP is set
-        if inode.mode & libc::S_IXGRP != 0 {
-            inode.mode &= !libc::S_ISGID;
+        if inode.mode & S_IXGRP != 0 {
+            inode.mode &= !S_ISGID;
         }
     }
 
@@ -531,11 +536,7 @@ impl Mfsr {
 }
 
 impl Filesystem for Mfsr {
-    fn init(
-        &mut self,
-        req: &Request<'_>,
-        _config: &mut fuser::KernelConfig,
-    ) -> Result<(), libc::c_int> {
+    fn init(&mut self, req: &Request<'_>, _config: &mut fuser::KernelConfig) -> Result<(), c_int> {
         self.super_block.update_last_mounted();
         self.super_block.uid = req.uid();
         self.super_block.gid = req.gid();
@@ -596,7 +597,7 @@ impl Filesystem for Mfsr {
 
         if let Some(mode) = mode {
             if req.uid() != 0 && req.uid() != inode.uid {
-                reply.error(libc::EPERM);
+                reply.error(EPERM);
                 return;
             }
             if req.uid() != 0 && req.gid() != inode.gid {
@@ -622,23 +623,23 @@ impl Filesystem for Mfsr {
             if let Some(gid) = gid {
                 // Non-root users can only change gid to a group they're in
                 if req.uid() != 0 && !self.get_groups(req.pid()).contains(&gid) {
-                    reply.error(libc::EPERM);
+                    reply.error(EPERM);
                     return;
                 }
             }
             if let Some(uid) = uid {
                 if req.uid() != 0 && !(uid == inode.uid && req.uid() == inode.uid) {
-                    reply.error(libc::EPERM);
+                    reply.error(EPERM);
                     return;
                 }
             }
             // Only owner may change the group
             if gid.is_some() && req.uid() != 0 && req.uid() != inode.uid {
-                reply.error(libc::EPERM);
+                reply.error(EPERM);
                 return;
             }
 
-            if inode.mode & (libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH) != 0 {
+            if inode.mode & (S_IXUSR | S_IXGRP | S_IXOTH) != 0 {
                 // SUID & SGID are cleared when chown'ing an executable file
                 inode.clear_suid_sgid();
             }
@@ -692,7 +693,7 @@ impl Filesystem for Mfsr {
 
         if let Some(atime) = atime {
             if inode.uid != req.uid() && req.uid() != 0 && atime != TimeOrNow::Now {
-                reply.error(libc::EPERM);
+                reply.error(EPERM);
                 return;
             }
 
@@ -703,7 +704,7 @@ impl Filesystem for Mfsr {
                     inode.mode as u16,
                     req.uid(),
                     req.gid(),
-                    libc::W_OK,
+                    W_OK,
                 )
             {
                 reply.error(EACCES);
@@ -716,7 +717,7 @@ impl Filesystem for Mfsr {
 
         if let Some(ctime) = ctime {
             if inode.uid != req.uid() && req.uid() != 0 {
-                reply.error(libc::EPERM);
+                reply.error(EPERM);
                 return;
             }
 
@@ -727,7 +728,7 @@ impl Filesystem for Mfsr {
                     inode.mode as u16,
                     req.uid(),
                     req.gid(),
-                    libc::W_OK,
+                    W_OK,
                 )
             {
                 reply.error(EACCES);
@@ -740,7 +741,7 @@ impl Filesystem for Mfsr {
 
         if let Some(crtime) = crtime {
             if inode.uid != req.uid() && req.uid() != 0 {
-                reply.error(libc::EPERM);
+                reply.error(EPERM);
                 return;
             }
 
@@ -751,7 +752,7 @@ impl Filesystem for Mfsr {
                     inode.mode as u16,
                     req.uid(),
                     req.gid(),
-                    libc::W_OK,
+                    W_OK,
                 )
             {
                 reply.error(EACCES);
@@ -764,7 +765,7 @@ impl Filesystem for Mfsr {
 
         if let Some(mtime) = mtime {
             if inode.uid != req.uid() && req.uid() != 0 && mtime != TimeOrNow::Now {
-                reply.error(libc::EPERM);
+                reply.error(EPERM);
                 return;
             }
 
@@ -775,7 +776,7 @@ impl Filesystem for Mfsr {
                     inode.mode as u16,
                     req.uid(),
                     req.gid(),
-                    libc::W_OK,
+                    W_OK,
                 )
             {
                 reply.error(EACCES);
@@ -788,7 +789,7 @@ impl Filesystem for Mfsr {
 
         if let Some(flags) = flags {
             if inode.uid != req.uid() && req.uid() != 0 {
-                reply.error(libc::EPERM);
+                reply.error(EPERM);
                 return;
             }
 
@@ -799,7 +800,7 @@ impl Filesystem for Mfsr {
                     inode.mode as u16,
                     req.uid(),
                     req.gid(),
-                    libc::W_OK,
+                    W_OK,
                 )
             {
                 reply.error(EACCES);
@@ -1254,13 +1255,13 @@ impl Filesystem for Mfsr {
             return;
         }
 
-        let (read, write) = match flags & libc::O_ACCMODE {
-            libc::O_RDONLY => (true, false),
-            libc::O_WRONLY => (false, true),
-            libc::O_RDWR => (true, true),
+        let (read, write) = match flags & O_ACCMODE {
+            O_RDONLY => (true, false),
+            O_WRONLY => (false, true),
+            O_RDWR => (true, true),
             // Exactly one access mode flag must be specified
             _ => {
-                reply.error(libc::EINVAL);
+                reply.error(EINVAL);
                 return;
             }
         };
@@ -1291,7 +1292,6 @@ impl Filesystem for Mfsr {
             req.gid(),
             flags as u32,
         );
-        let mut dentry = DirectoryEntry::new(new_inode.id);
 
         let mut parent_dentry = match self.get_dentry(&parent_inode) {
             Ok(d) => d,
@@ -1310,11 +1310,6 @@ impl Filesystem for Mfsr {
             .write_dentry(&mut parent_inode, &mut parent_dentry)
             .is_err()
         {
-            reply.error(EIO);
-            return;
-        }
-
-        if self.write_dentry(&mut new_inode, &mut dentry).is_err() {
             reply.error(EIO);
             return;
         }
@@ -1353,7 +1348,7 @@ impl Filesystem for Mfsr {
             parent_inode.mode as u16,
             req.uid(),
             req.gid(),
-            libc::W_OK,
+            W_OK,
         ) {
             reply.error(EACCES);
             return;
@@ -1361,7 +1356,7 @@ impl Filesystem for Mfsr {
 
         let uid = req.uid();
 
-        if parent_inode.mode & libc::S_ISVTX != 0 // sticky bit
+        if parent_inode.mode & S_ISVTX != 0 // sticky bit
             && uid != 0
             && uid != parent_inode.uid
             && uid != parent_inode.uid
@@ -1438,19 +1433,19 @@ impl Filesystem for Mfsr {
             parent_inode.mode as u16,
             req.uid(),
             req.gid(),
-            libc::W_OK,
+            W_OK,
         ) {
-            reply.error(libc::EACCES);
+            reply.error(EACCES);
             return;
         }
 
         // "Sticky bit" handling
-        if parent_inode.mode & libc::S_ISVTX != 0
+        if parent_inode.mode & S_ISVTX != 0
             && req.uid() != 0
             && req.uid() != parent_inode.uid
             && req.uid() != inode.uid
         {
-            reply.error(libc::EACCES);
+            reply.error(EACCES);
             return;
         }
 
@@ -1468,14 +1463,14 @@ impl Filesystem for Mfsr {
             new_parent_inode.mode as u16,
             req.uid(),
             req.gid(),
-            libc::W_OK,
+            W_OK,
         ) {
-            reply.error(libc::EACCES);
+            reply.error(EACCES);
             return;
         }
 
         // "Sticky bit" handling in new_parent
-        if new_parent_inode.mode & libc::S_ISVTX != 0 {
+        if new_parent_inode.mode & S_ISVTX != 0 {
             if let Some(existing_inode) = self.lookup_inode(new_parent, new_name) {
                 if req.uid() != 0
                     && req.uid() != new_parent_inode.uid
@@ -1597,7 +1592,7 @@ impl Filesystem for Mfsr {
             if new_name_inode.kind == FileType::Directory
                 && self.get_dentry(&new_name_inode).unwrap().entries.len() > 2
             {
-                reply.error(libc::ENOTEMPTY);
+                reply.error(ENOTEMPTY);
                 return;
             }
         }
@@ -1610,10 +1605,10 @@ impl Filesystem for Mfsr {
                 inode.mode as u16,
                 req.uid(),
                 req.gid(),
-                libc::W_OK,
+                W_OK,
             )
         {
-            reply.error(libc::EACCES);
+            reply.error(EACCES);
             return;
         }
 
@@ -1721,13 +1716,13 @@ impl Filesystem for Mfsr {
             parent_inode.mode as u16,
             req.uid(),
             req.gid(),
-            libc::W_OK,
+            W_OK,
         ) {
-            reply.error(libc::EACCES);
+            reply.error(EACCES);
             return;
         }
 
-        if parent_inode.mode & libc::S_ISVTX != 0
+        if parent_inode.mode & S_ISVTX != 0
             && req.uid() != 0
             && req.uid() != parent_inode.uid
             && req.uid() != inode.uid
@@ -1778,7 +1773,7 @@ impl Filesystem for Mfsr {
                 ) {
                     reply.ok();
                 } else {
-                    reply.error(libc::EACCES);
+                    reply.error(EACCES);
                 }
             }
             None => reply.error(ENOENT),
