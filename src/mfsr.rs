@@ -25,7 +25,7 @@ use crate::{
     },
     utils::{
         bytes_to_pointers, bytes_to_u64, current_timestamp, get_block_group_size,
-        get_inode_table_size, pointer_to_bytes, system_time_to_timestamp, time_or_now_to_timestamp,
+        get_inode_table_size, pointer_to_bytes, system_time_to_timestamp, time_or_now_to_timestamp, pointers_to_bytes,
     },
 };
 
@@ -958,9 +958,9 @@ impl Filesystem for Mfsr {
         fh: u64,
         offset: i64,
         data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        write_flags: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
         if !self.check_file_handle_write(fh) {
@@ -989,7 +989,7 @@ impl Filesystem for Mfsr {
             let is_indirect_pointer =
                 i + start_block >= 12 && i + start_block < pointers_per_indirect_block + 12;
             let is_doubly_indirect_pointer =
-                i + start_block < pointers_per_indirect_block * pointers_per_indirect_block + 12;
+                i + start_block >= pointers_per_indirect_block  + 12 && i + start_block < pointers_per_indirect_block * pointers_per_indirect_block + 12;
 
             if is_direct_pointer {
                 let is_new_block = inode.direct_pointers[i + start_block] == 0;
@@ -1037,7 +1037,7 @@ impl Filesystem for Mfsr {
 
                     inode.block_count += 1;
                     self.super_block.block_count += 1;
-                    self.super_block.free_blocks -= 1
+                    self.super_block.free_blocks -= 1;
                 }
 
                 let pointer = inode.doubly_indirect_pointer;
@@ -1048,20 +1048,58 @@ impl Filesystem for Mfsr {
                         return;
                     }
                 };
-                let indirect_pointer_offset = i + start_block
-                    - pointers_per_indirect_block * pointers_per_indirect_block
-                    - 12;
+
+                let indirect_pointer_offset = i + start_block - pointers_per_indirect_block - 12;
                 let mut indirect_pointer = indirect_pointers[indirect_pointer_offset];
 
                 if indirect_pointer == 0 {
                     indirect_pointers[indirect_pointer_offset] = self.next_free_data_block();
                     indirect_pointer = indirect_pointers[indirect_pointer_offset];
-                    self.write_indirect_pointer(&mut inode, indirect_pointer_offset, &vec![0; self.super_block.block_size as usize]).unwrap();
+                    self.write_indirect_pointer(
+                        &mut inode,
+                        indirect_pointer_offset,
+                        &vec![0; self.super_block.block_size as usize],
+                    )
+                    .unwrap();
+                    inode.block_count += 1;
+                    self.super_block.block_count += 1;
+                    self.super_block.free_blocks -= 1;
                 }
-                   
-                let direct_pointer_offset = 
+
+                let direct_pointers_per_block =
+                    self.super_block.block_size as usize / size_of::<u32>();
+
+                let direct_pointer_offset = (i + start_block
+                    - pointers_per_indirect_block * pointers_per_indirect_block
+                    - 12)
+                    / direct_pointers_per_block;
+
+                let mut direct_pointers = match self.read_indirect_pointer(indirect_pointer) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        reply.error(EIO);
+                        return;
+                    }
+                };
+                let mut direct_pointer = direct_pointers[direct_pointer_offset];
+
+                if direct_pointer == 0 {
+                    direct_pointers[direct_pointer_offset] = self.next_free_data_block();
+                    direct_pointer = direct_pointers[direct_pointer_offset];
+                    self.write_indirect_pointer(
+                        &mut inode,
+                        indirect_pointer_offset,
+                        &pointers_to_bytes(direct_pointers),
+                    )
+                    .unwrap();
+                    inode.block_count += 1;
+                    self.super_block.block_count += 1;
+                    self.super_block.free_blocks -= 1;
+                }
+
+                written += self.write_data(direct_pointer, chunk).unwrap();
             } else {
-                reply.error(EFBIG);
+                reply.error(EINVAL); // Handle invalid case as needed
                 return;
             }
         }

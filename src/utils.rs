@@ -96,3 +96,15 @@ pub fn u64_to_bytes(value: u64) -> [u8; 8] {
 
     result
 }
+
+#[inline(always)]
+pub fn pointers_to_bytes(pointers: Vec<u32>) -> Vec<u8> {
+    let mut result = Vec::with_capacity(pointers.len() * std::mem::size_of::<u32>());
+
+    for &pointer in &pointers {
+        let pointer_bytes = pointer_to_bytes(pointer);
+        result.extend_from_slice(&pointer_bytes);
+    }
+
+    result
+}
