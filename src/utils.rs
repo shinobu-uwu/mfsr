@@ -55,22 +55,44 @@ pub fn get_data_block_size(block_size: u32) -> u64 {
 }
 
 #[inline(always)]
-pub fn bytes_to_pointers(chunk: &[u8]) -> u64 {
-    let mut result = 0u64;
+pub fn bytes_to_pointers(chunk: &[u8]) -> u32 {
+    let mut result = 0u32;
 
     for (i, &byte) in chunk.iter().enumerate() {
-        result |= (byte as u64) << (i * 8);
+        result |= (byte as u32) << (i * 8);
     }
     result
 }
 
 #[inline(always)]
-pub fn pointer_to_bytes(pointer: u64) -> [u8; 8] {
-    let mut bytes = [0u8; 8];
+pub fn pointer_to_bytes(pointer: u32) -> [u8; 4] {
+    let mut bytes = [0u8; 4];
 
-    for i in 0..8 {
+    for i in 0..4 {
         bytes[i] = ((pointer >> (8 * i)) & 0xFF) as u8;
     }
 
     bytes
+}
+
+#[inline(always)]
+pub fn bytes_to_u64(bytes: [u8; 8]) -> u64 {
+    let mut result = 0u64;
+
+    for (i, &byte) in bytes.iter().enumerate() {
+        result |= (byte as u64) << (8 * i);
+    }
+
+    result
+}
+
+#[inline(always)]
+pub fn u64_to_bytes(value: u64) -> [u8; 8] {
+    let mut result = [0u8; 8];
+
+    for i in 0..8 {
+        result[i] = ((value >> (8 * i)) & 0xFF) as u8;
+    }
+
+    result
 }

@@ -1,10 +1,14 @@
 use std::{
+    borrow::BorrowMut,
     collections::BTreeMap,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
+    mem::size_of,
 };
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::utils::u64_to_bytes;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DirectoryEntry {
@@ -20,10 +24,13 @@ impl DirectoryEntry {
         }
     }
 
-    pub fn serialize_into<W>(&mut self, w: W) -> Result<()>
+    pub fn serialize_into<W>(&mut self, mut w: W) -> Result<()>
     where
-        W: Write,
+        W: Write + Seek,
     {
+        let len = bincode::serialized_size(self)?;
+        let buf = u64_to_bytes(len);
+        w.write_all(&buf)?;
         bincode::serialize_into(w, self).map_err(|e| e.into())
     }
 

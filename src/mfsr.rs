@@ -1,17 +1,16 @@
 use std::{
-    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write},
-    mem::size_of,
+    mem::{size_of, size_of_val},
     path::Path,
     time::{Duration, SystemTime},
 };
 
 use anyhow::Result;
 use fuser::{
-    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, TimeOrNow,
-    FUSE_ROOT_ID,
+    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
+    TimeOrNow, FUSE_ROOT_ID,
 };
 use libc::{
     c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, R_OK, S_ISGID, S_ISUID, W_OK,
@@ -20,10 +19,13 @@ use libc::{
 use memmap2::{MmapMut, MmapOptions};
 
 use crate::{
-    types::{block_group::BlockGroup, inode::Inode, super_block::SuperBlock},
+    types::{
+        block_group::BlockGroup, directory_entry::DirectoryEntry, inode::Inode,
+        super_block::SuperBlock,
+    },
     utils::{
-        bytes_to_pointers, current_timestamp, get_block_group_size, get_inode_table_size,
-        pointer_to_bytes, system_time_to_timestamp, time_or_now_to_timestamp,
+        bytes_to_pointers, bytes_to_u64, current_timestamp, get_block_group_size,
+        get_inode_table_size, pointer_to_bytes, system_time_to_timestamp, time_or_now_to_timestamp,
     },
 };
 
@@ -40,7 +42,6 @@ pub struct Mfsr {
     super_block: SuperBlock,
     io_map: MmapMut,
     block_groups: Vec<BlockGroup>,
-    dentry: BTreeMap<u64, BTreeMap<OsString, u64>>,
     next_fh: u64,
 }
 
@@ -73,7 +74,6 @@ impl Mfsr {
             block_groups,
             io_map,
             next_fh: 1,
-            dentry: BTreeMap::new(),
         };
 
         fs.create_root()?;
@@ -117,17 +117,6 @@ impl Mfsr {
         return access_mask == 0;
     }
 
-    fn create_dentry(&mut self, parent_id: u64, name: &OsStr, inode_id: u64) {
-        let entries = self.dentry.entry(parent_id).or_insert(BTreeMap::new());
-        entries.insert(name.to_owned(), inode_id);
-    }
-
-    fn delete_dentry(&mut self, parent_id: u64, name: &OsStr) {
-        if let Some(entries) = self.dentry.get_mut(&parent_id) {
-            entries.remove(name);
-        }
-    }
-
     fn parse_flags(&self, flags: i32) -> Result<(c_int, bool, bool), c_int> {
         match flags & libc::O_ACCMODE {
             libc::O_RDONLY => {
@@ -153,6 +142,8 @@ impl Mfsr {
         } else {
             let mut inode = Inode::new(FUSE_ROOT_ID, FileType::Directory, 0o777, 0, 0, 0);
             inode.hard_links = 2;
+            let mut dentry = DirectoryEntry::new(FUSE_ROOT_ID);
+            self.write_dentry(&mut inode, &mut dentry)?;
             self.write_inode(&mut inode)?;
             Ok(())
         }
@@ -207,10 +198,21 @@ impl Mfsr {
     }
 
     fn delete_inode(&mut self, inode_id: u64) {
+        let inode = self.get_inode(inode_id).unwrap();
         let (group_id, bitmap_byte_index, bitmap_bit_index) = self.inode_bitmap_offset(inode_id);
         let group = &mut self.block_groups[group_id as usize];
         group.inode_bitmap[bitmap_byte_index as usize] &= !(1 << bitmap_bit_index);
         self.super_block.free_inodes += 1;
+
+        for pointer in inode.direct_pointers {
+            if pointer == 0 {
+                continue;
+            }
+
+            let (group_id, bitmap_byte_index, bitmap_bit_index) = self.data_block_bitmap_offset(pointer);
+            let group = &mut self.block_groups[group_id as usize];
+            group.data_bitmap[bitmap_byte_index as usize] &= !(1 << bitmap_bit_index);
+        }
     }
 
     fn inode_bitmap_offset(&self, inode_id: u64) -> (usize, usize, usize) {
@@ -234,17 +236,16 @@ impl Mfsr {
     }
 
     fn lookup_inode(&mut self, parent_id: u64, name: &OsStr) -> Option<Inode> {
-        if let Some(parent_inode) = self.get_inode(parent_id) {
-            if let Some(child_id) = self
-                .dentry
-                .get(&parent_inode.id)
-                .and_then(|entries| entries.get(name))
-            {
-                return self.get_inode(*child_id);
-            }
-        }
+        let inode = self.get_inode(parent_id)?;
+        let dentry = match self.get_dentry(&inode) {
+            Ok(d) => d,
+            Err(_) => return None,
+        };
 
-        None
+        match dentry.entries.get(name.to_str().unwrap()) {
+            Some(&i) => self.get_inode(i),
+            None => None,
+        }
     }
 
     fn next_inode_id(&self) -> u64 {
@@ -280,25 +281,25 @@ impl Mfsr {
         fh
     }
 
-    fn data_block_id_to_address(&self, block_id: u64) -> u64 {
-        let cluster_size = self.super_block.block_size as u64;
-        let group_id = block_id / self.super_block.block_size as u64;
+    fn data_block_id_to_address(&self, block_id: u32) -> u32 {
+        let cluster_size = self.super_block.block_size;
+        let group_id = block_id / self.super_block.block_size as u32;
         let offset = (block_id - 1) - group_id * cluster_size;
 
-        group_id * get_block_group_size(self.super_block.block_size)
+        group_id * get_block_group_size(self.super_block.block_size) as u32
             + cluster_size * 3 // super block + data bitmap + inode bitmap
-            + get_inode_table_size(cluster_size as u32)
+            + get_inode_table_size(cluster_size as u32) as u32
             + offset * cluster_size
     }
 
-    fn next_free_data_block(&self) -> u64 {
+    fn next_free_data_block(&self) -> u32 {
         for (group_id, group) in self.block_groups.iter().enumerate() {
             for (byte_index, byte) in group.data_bitmap.iter().enumerate() {
                 for bit_index in 0..8 {
                     if byte >> bit_index & 1 == 0 {
-                        return (group_id as u64 * self.super_block.block_size as u64)
-                            + (byte_index as u64 * 8)
-                            + bit_index as u64
+                        return (group_id as u32 * self.super_block.block_size as u32)
+                            + (byte_index as u32 * 8)
+                            + bit_index as u32
                             + 1;
                     }
                 }
@@ -376,9 +377,9 @@ impl Mfsr {
         }
     }
 
-    fn data_block_bitmap_offset(&self, block_id: u64) -> (usize, usize, usize) {
-        let group_offset = block_id / self.super_block.block_size as u64;
-        let byte_offset = ((block_id - 1) - group_offset * self.super_block.block_size as u64) / 8;
+    fn data_block_bitmap_offset(&self, block_id: u32) -> (usize, usize, usize) {
+        let group_offset = block_id / self.super_block.block_size;
+        let byte_offset = ((block_id - 1) - group_offset * self.super_block.block_size) / 8;
         let bit_offset = (block_id - 1) % 8;
 
         (
@@ -389,10 +390,10 @@ impl Mfsr {
     }
 
     #[inline(always)]
-    fn write_data(&mut self, block_id: u64, data: &[u8]) -> Result<usize> {
+    fn write_data(&mut self, block_id: u32, data: &[u8]) -> Result<usize> {
         let address = self.data_block_id_to_address(block_id);
         let mut cursor = Cursor::new(self.io_map.as_mut());
-        cursor.seek(SeekFrom::Start(address))?;
+        cursor.seek(SeekFrom::Start(address as u64))?;
         cursor.write_all(data)?;
         let (group_index, byte_index, bit_index) = self.data_block_bitmap_offset(block_id);
         self.block_groups[group_index].data_bitmap[byte_index] |= 1 << bit_index;
@@ -401,11 +402,120 @@ impl Mfsr {
     }
 
     #[inline(always)]
-    fn read_data(&mut self, block_id: u64, buf: &mut [u8]) -> Result<()> {
+    fn read_data(&mut self, block_id: u32, buf: &mut [u8]) -> Result<()> {
         let address = self.data_block_id_to_address(block_id);
         let mut cursor = Cursor::new(self.io_map.as_ref());
-        cursor.seek(SeekFrom::Start(address))?;
+        cursor.seek(SeekFrom::Start(address as u64))?;
         cursor.read_exact(buf)?;
+
+        Ok(())
+    }
+
+    fn write_indirect_pointer(
+        &mut self,
+        mut inode: &mut Inode,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<usize, c_int> {
+        if inode.indirect_pointer == 0 {
+            let pointers = vec![0; self.super_block.block_size as usize];
+            let indirect_block_id = self.next_free_data_block();
+
+            if self.write_data(indirect_block_id, &pointers).is_err() {
+                return Err(EIO);
+            }
+
+            inode.indirect_pointer = indirect_block_id;
+
+            if self.write_inode(&mut inode).is_err() {
+                return Err(EIO);
+            }
+
+            inode.block_count += 1;
+            self.super_block.block_count += 1;
+            self.super_block.free_blocks -= 1
+        }
+
+        let mut buf = vec![0; self.super_block.block_size as usize];
+
+        if self.read_data(inode.indirect_pointer, &mut buf).is_err() {
+            return Err(EIO);
+        };
+
+        let mut pointers: Vec<u32> = buf.chunks_exact(4).map(bytes_to_pointers).collect();
+        let pointer = pointers[offset];
+        let block_id = if pointer == 0 {
+            inode.block_count += 1;
+            self.super_block.block_count += 1;
+            self.super_block.free_blocks -= 1;
+            self.next_free_data_block()
+        } else {
+            pointer
+        };
+
+        if self.write_data(block_id, data).is_err() {
+            return Err(EIO);
+        }
+
+        pointers[offset] = block_id;
+        let mut buf = vec![];
+
+        for pointer in pointers {
+            let slice = pointer_to_bytes(pointer);
+            buf.extend_from_slice(&slice);
+        }
+
+        if self
+            .write_data(inode.indirect_pointer, buf.as_slice())
+            .is_err()
+        {
+            return Err(EIO);
+        }
+
+        Ok(data.len())
+    }
+
+    fn get_dentry(&mut self, parent_inode: &Inode) -> Result<DirectoryEntry> {
+        let address = self.data_block_id_to_address(parent_inode.direct_pointers[0]) as u64;
+        let mut cursor = Cursor::new(self.io_map.as_ref());
+        cursor.seek(SeekFrom::Start(address))?;
+        let mut buf = [0; size_of::<u64>()];
+        cursor.read_exact(&mut buf)?;
+        let len = bytes_to_u64(buf);
+        let mut result_buf = vec![0; len as usize];
+
+        for direct_pointer in parent_inode.direct_pointers {
+            if direct_pointer == 0 {
+                continue;
+            }
+
+            cursor.read_exact(&mut result_buf)?;
+        }
+
+        let result = DirectoryEntry::deserialize_from(Cursor::new(result_buf)).unwrap();
+        Ok(result)
+    }
+
+    fn write_dentry(
+        &mut self,
+        parent_inode: &mut Inode,
+        dentry: &mut DirectoryEntry,
+    ) -> Result<()> {
+        let mut buf = vec![];
+        dentry.serialize_into(Cursor::new(&mut buf))?;
+
+        for (i, chunk) in buf.chunks(self.super_block.block_size as usize).enumerate() {
+            let block_id = if parent_inode.direct_pointers[i] == 0 {
+                parent_inode.block_count += 1;
+                self.super_block.block_count += 1;
+                self.next_free_data_block()
+            } else {
+                parent_inode.direct_pointers[i]
+            };
+
+            parent_inode.direct_pointers[i] = block_id;
+            self.write_data(block_id, chunk)?;
+        }
 
         Ok(())
     }
@@ -783,9 +893,33 @@ impl Filesystem for Mfsr {
             0,
         );
         new_inode.hard_links = 2;
-        self.create_dentry(parent, name, new_inode.id);
+        let mut parenty_dentry = match self.get_dentry(&parent_inode) {
+            Ok(d) => d,
+            Err(_) => {
+                reply.error(EIO);
+                return;
+            }
+        };
+        let mut dentry = DirectoryEntry::new(new_inode.id);
+
+        parenty_dentry
+            .entries
+            .insert(name.to_str().unwrap().to_string(), new_inode.id);
         parent_inode.last_modified = current_timestamp();
         parent_inode.last_metadata_changed = current_timestamp();
+
+        if self.write_dentry(&mut new_inode, &mut dentry).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
+        if self
+            .write_dentry(&mut parent_inode, &mut parenty_dentry)
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
 
         match self.write_inode(&mut parent_inode) {
             Ok(_) => {}
@@ -837,16 +971,26 @@ impl Filesystem for Mfsr {
 
         let mut written = 0;
         let start_block = (offset / self.super_block.block_size as i64) as usize;
-        let pointers_per_indirect_block = self.super_block.block_size as usize / size_of::<u64>();
+        let pointers_per_indirect_block =
+            self.super_block.block_size as usize / size_of_val(&inode.indirect_pointer);
 
         for (i, chunk) in data
             .chunks(self.super_block.block_size as usize)
             .enumerate()
         {
-            if i + start_block < 12 {
+            let is_direct_pointer = i + start_block < 12;
+            let is_indirect_pointer =
+                i + start_block >= 12 && i + start_block < pointers_per_indirect_block + 12;
+            let is_doubly_indirect_pointer =
+                i + start_block < pointers_per_indirect_block * pointers_per_indirect_block + 12;
+
+            if is_direct_pointer {
                 let is_new_block = inode.direct_pointers[i + start_block] == 0;
 
                 let block_id = if is_new_block {
+                    inode.block_count += 1;
+                    self.super_block.block_count += 1;
+                    self.super_block.free_blocks -= 1;
                     self.next_free_data_block()
                 } else {
                     inode.direct_pointers[i + start_block]
@@ -859,62 +1003,15 @@ impl Filesystem for Mfsr {
 
                 inode.direct_pointers[i + start_block] = block_id;
                 written += chunk.len();
-                inode.block_count += 1;
-            } else if i + start_block >= 12 && i + start_block <= pointers_per_indirect_block {
-                if inode.indirect_pointer == 0 {
-                    let pointers = vec![0; self.super_block.block_size as usize];
-                    let indirect_block_id = self.next_free_data_block();
-
-                    if self.write_data(indirect_block_id, &pointers).is_err() {
-                        reply.error(EIO);
-                        return;
-                    }
-
-                    inode.indirect_pointer = indirect_block_id;
-
-                    if self.write_inode(&mut inode).is_err() {
-                        reply.error(EIO);
+            } else if is_indirect_pointer {
+                match self.write_indirect_pointer(&mut inode, i + start_block - 12, chunk) {
+                    Ok(w) => written += w,
+                    Err(c) => {
+                        reply.error(c);
                         return;
                     }
                 }
-
-                let mut buf = vec![0; self.super_block.block_size as usize];
-
-                if self.read_data(inode.indirect_pointer, &mut buf).is_err() {
-                    reply.error(EIO);
-                    return;
-                };
-
-                let mut pointers: Vec<u64> = buf.chunks_exact(8).map(bytes_to_pointers).collect();
-                let pointer = pointers[i + start_block - 12];
-                let block_id = if pointer == 0 {
-                    self.next_free_data_block()
-                } else {
-                    pointer
-                };
-
-                if self.write_data(block_id, chunk).is_err() {
-                    reply.error(EIO);
-                    return;
-                }
-
-                pointers[i + start_block - 12] = block_id;
-                let mut buf = vec![];
-
-                for pointer in pointers {
-                    let slice = pointer_to_bytes(pointer);
-                    buf.extend_from_slice(&slice);
-                }
-
-                if self
-                    .write_data(inode.indirect_pointer, buf.as_slice())
-                    .is_err()
-                {
-                    reply.error(EIO);
-                    return;
-                }
-
-                written += chunk.len();
+            } else if is_doubly_indirect_pointer {
             } else {
                 reply.error(EFBIG);
                 return;
@@ -981,7 +1078,7 @@ impl Filesystem for Mfsr {
                     return;
                 }
 
-                let pointers: Vec<u64> = buf.chunks_exact(8).map(bytes_to_pointers).collect();
+                let pointers: Vec<u32> = buf.chunks_exact(4).map(bytes_to_pointers).collect();
                 let block_id = pointers[i - 12];
 
                 if self.read_data(block_id, &mut buf).is_err() {
@@ -1071,23 +1168,20 @@ impl Filesystem for Mfsr {
             return;
         }
 
-        // Ensure offset is within bounds
         if offset < 0 {
             reply.error(EINVAL);
             return;
         }
 
-        // Clone the directory entries for the given inode
-        let dir_entries = match self.dentry.get(&ino).cloned() {
-            Some(entries) => entries,
-            None => {
+        let dentry = match self.get_dentry(&inode) {
+            Ok(d) => d,
+            Err(_) => {
                 reply.error(ENOENT);
                 return;
             }
         };
 
-        // Iterate over cloned directory entries starting from the specified offset
-        for (index, entry) in dir_entries.iter().skip(offset as usize).enumerate() {
+        for (index, entry) in dentry.entries.iter().skip(offset as usize).enumerate() {
             let (name, inode_id) = entry;
             let child_inode = match self.get_inode(*inode_id) {
                 Some(i) => i,
@@ -1097,12 +1191,10 @@ impl Filesystem for Mfsr {
                 }
             };
 
-            // Add the directory entry to the FUSE reply
             let buffer_full =
                 reply.add(*inode_id, offset + index as i64 + 1, child_inode.kind, name);
 
             if buffer_full {
-                // The buffer is full, so we should stop adding entries
                 break;
             }
         }
@@ -1194,16 +1286,37 @@ impl Filesystem for Mfsr {
             req.gid(),
             flags as u32,
         );
-        self.create_dentry(parent, name, new_inode.id);
-        parent_inode.last_modified = current_timestamp();
-        parent_inode.last_metadata_changed = current_timestamp();
+        let mut dentry = DirectoryEntry::new(new_inode.id);
 
-        match self.write_inode(&mut parent_inode) {
-            Ok(()) => {}
+        let mut parent_dentry = match self.get_dentry(&parent_inode) {
+            Ok(d) => d,
             Err(_) => {
                 reply.error(EIO);
                 return;
             }
+        };
+        parent_dentry
+            .entries
+            .insert(name.to_str().unwrap().to_string(), new_inode.id);
+        parent_inode.last_modified = current_timestamp();
+        parent_inode.last_metadata_changed = current_timestamp();
+
+        if self
+            .write_dentry(&mut parent_inode, &mut parent_dentry)
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+
+        if self.write_dentry(&mut new_inode, &mut dentry).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
+        if self.write_inode(&mut parent_inode).is_err() {
+            reply.error(EIO);
+            return;
         }
 
         match self.write_inode(&mut new_inode) {
@@ -1261,16 +1374,28 @@ impl Filesystem for Mfsr {
         };
 
         self.delete_inode(inode_id);
-        self.delete_dentry(parent, name);
         parent_inode.last_metadata_changed = current_timestamp();
         parent_inode.last_modified = current_timestamp();
-
-        match self.write_inode(&mut parent_inode) {
-            Ok(()) => {}
+        let mut parent_dentry = match self.get_dentry(&parent_inode) {
+            Ok(d) => d,
             Err(_) => {
                 reply.error(EIO);
                 return;
             }
+        };
+        parent_dentry.entries.remove(name.to_str().unwrap());
+
+        if self
+            .write_dentry(&mut parent_inode, &mut parent_dentry)
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+
+        if self.write_inode(&mut parent_inode).is_err() {
+            reply.error(EIO);
+            return;
         }
 
         reply.ok();

@@ -26,10 +26,10 @@ pub struct Inode {
     pub block_count: u64,
     pub rdev: u32,
     pub flags: u32,
-    pub direct_pointers: [u64; 12],
-    pub indirect_pointer: u64,
-    pub doubly_indirect_pointer: u64,
-    pub triply_indirect_pointer: u64,
+    pub direct_pointers: [u32; 12],
+    pub indirect_pointer: u32,
+    pub doubly_indirect_pointer: u32,
+    pub triply_indirect_pointer: u32,
     pub checksum: u32,
 }
 
