@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crc32fast::Hasher;
 use libc::{gid_t, uid_t};
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,7 @@ impl SuperBlock {
     where
         W: Write,
     {
+        self.checksum();
         bincode::serialize_into(w, self).map_err(|e| e.into())
     }
 
@@ -67,20 +68,21 @@ impl SuperBlock {
     where
         R: Read,
     {
-        let sb: Self = bincode::deserialize_from(r)?;
+        let mut sb: Self = bincode::deserialize_from(r)?;
 
-        // if !sb.verify_checksum() {
-        // Err(anyhow!("Invalid superblock checksum"))
-        // } else {
-        Ok(sb)
-        // }
+        if !sb.verify_checksum() {
+            Err(anyhow!("Invalid superblock checksum"))
+        } else {
+            Ok(sb)
+        }
     }
 
     pub fn checksum(&mut self) {
         self.checksum = self.calculate_checksum();
     }
 
-    pub fn calculate_checksum(&self) -> u32 {
+    pub fn calculate_checksum(&mut self) -> u32 {
+        self.checksum = 0;
         let mut hasher = Hasher::new();
         hasher.update(&bincode::serialize(&self).unwrap());
         hasher.finalize()

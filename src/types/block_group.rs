@@ -24,7 +24,6 @@ impl BlockGroup {
         W: Write + Seek,
     {
         assert!(!groups.is_empty());
-        super_block.checksum();
         let block_size = super_block.block_size;
 
         for (i, g) in groups.iter().enumerate() {

@@ -1,6 +1,6 @@
 use std::{io::Read, io::Write};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crc32fast::Hasher;
 use fuser::{FileAttr, FileType};
 use libc::{gid_t, mode_t, uid_t};
@@ -82,6 +82,7 @@ impl Inode {
     where
         W: Write,
     {
+        self.checksum();
         bincode::serialize_into(w, self).map_err(|e| e.into())
     }
 
@@ -89,20 +90,21 @@ impl Inode {
     where
         R: Read,
     {
-        let inode: Self = bincode::deserialize_from(r)?;
+        let mut inode: Self = bincode::deserialize_from(r)?;
 
-        // if !sb.verify_checksum() {
-        // Err(anyhow!("Invalid superblock checksum"))
-        // } else {
-        Ok(inode)
-        // }
+        if !inode.verify_checksum() {
+            Err(anyhow!("Invalid superblock checksum"))
+        } else {
+            Ok(inode)
+        }
     }
 
     pub fn checksum(&mut self) {
         self.checksum = self.calculate_checksum();
     }
 
-    pub fn calculate_checksum(&self) -> u32 {
+    pub fn calculate_checksum(&mut self) -> u32 {
+        self.checksum = 0;
         let mut hasher = Hasher::new();
         hasher.update(&bincode::serialize(&self).unwrap());
         hasher.finalize()
@@ -111,7 +113,13 @@ impl Inode {
     pub fn verify_checksum(&mut self) -> bool {
         let checksum = self.checksum;
         self.checksum = 0;
-        let ok = checksum == self.calculate_checksum();
+        let new_checksum = self.calculate_checksum();
+        let ok = checksum == new_checksum;
+
+        if !ok {
+            println!("AHCLK");
+        }
+
         self.checksum = checksum;
 
         ok

@@ -9,12 +9,12 @@ use std::{
 
 use anyhow::Result;
 use fuser::{
-    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
-    TimeOrNow, FUSE_ROOT_ID,
+    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, TimeOrNow,
+    FUSE_ROOT_ID,
 };
 use libc::{
-    c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, RENAME_EXCHANGE, R_OK,
-    S_ISGID, S_ISUID, W_OK, X_OK,
+    c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOTEMPTY, RENAME_EXCHANGE,
+    R_OK, S_ISGID, S_ISUID, W_OK, X_OK,
 };
 use memmap2::{MmapMut, MmapOptions};
 
@@ -34,8 +34,8 @@ const MAX_NAME_LENGTH: usize = 255;
 const FMODE_EXEC: i32 = 0x20;
 const FILE_HANDLE_READ_BIT: u64 = 1 << 63;
 const FILE_HANDLE_WRITE_BIT: u64 = 1 << 62;
-// with triply indirect pointers we can have file sizes up to 4 TiB
-const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+// with doubly indirect pointers we can have file sizes up to 4 GiB
+const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct Mfsr {
@@ -412,9 +412,19 @@ impl Mfsr {
         Ok(())
     }
 
+    fn read_indirect_pointer(&mut self, indirect_pointer: u32) -> Result<Vec<u32>> {
+        let mut buf = vec![0; self.super_block.block_size as usize];
+        self.read_data(indirect_pointer, &mut buf)?;
+
+        Ok(buf
+            .chunks_exact(size_of_val(&indirect_pointer))
+            .map(bytes_to_pointers)
+            .collect())
+    }
+
     fn write_indirect_pointer(
         &mut self,
-        mut inode: &mut Inode,
+        inode: &mut Inode,
         offset: usize,
         data: &[u8],
     ) -> Result<usize, c_int> {
@@ -428,7 +438,7 @@ impl Mfsr {
 
             inode.indirect_pointer = indirect_block_id;
 
-            if self.write_inode(&mut inode).is_err() {
+            if self.write_inode(inode).is_err() {
                 return Err(EIO);
             }
 
@@ -437,13 +447,9 @@ impl Mfsr {
             self.super_block.free_blocks -= 1
         }
 
-        let mut buf = vec![0; self.super_block.block_size as usize];
-
-        if self.read_data(inode.indirect_pointer, &mut buf).is_err() {
-            return Err(EIO);
-        };
-
-        let mut pointers: Vec<u32> = buf.chunks_exact(4).map(bytes_to_pointers).collect();
+        let mut pointers = self
+            .read_indirect_pointer(inode.indirect_pointer)
+            .map_err(|_| EIO)?;
         let pointer = pointers[offset];
         let block_id = if pointer == 0 {
             inode.block_count += 1;
@@ -1013,6 +1019,47 @@ impl Filesystem for Mfsr {
                     }
                 }
             } else if is_doubly_indirect_pointer {
+                if inode.doubly_indirect_pointer == 0 {
+                    let pointers = vec![0; self.super_block.block_size as usize];
+                    let indirect_block_id = self.next_free_data_block();
+
+                    if self.write_data(indirect_block_id, &pointers).is_err() {
+                        reply.error(EIO);
+                        return;
+                    }
+
+                    inode.doubly_indirect_pointer = indirect_block_id;
+
+                    if self.write_inode(&mut inode).is_err() {
+                        reply.error(EIO);
+                        return;
+                    }
+
+                    inode.block_count += 1;
+                    self.super_block.block_count += 1;
+                    self.super_block.free_blocks -= 1
+                }
+
+                let pointer = inode.doubly_indirect_pointer;
+                let mut indirect_pointers: Vec<u32> = match self.read_indirect_pointer(pointer) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        reply.error(EIO);
+                        return;
+                    }
+                };
+                let indirect_pointer_offset = i + start_block
+                    - pointers_per_indirect_block * pointers_per_indirect_block
+                    - 12;
+                let mut indirect_pointer = indirect_pointers[indirect_pointer_offset];
+
+                if indirect_pointer == 0 {
+                    indirect_pointers[indirect_pointer_offset] = self.next_free_data_block();
+                    indirect_pointer = indirect_pointers[indirect_pointer_offset];
+                    self.write_indirect_pointer(&mut inode, indirect_pointer_offset, &vec![0; self.super_block.block_size as usize]).unwrap();
+                }
+                   
+                let direct_pointer_offset = 
             } else {
                 reply.error(EFBIG);
                 return;
@@ -1650,12 +1697,14 @@ impl Filesystem for Mfsr {
         }
 
         let mut dentry = self.get_dentry(&new_parent_inode).unwrap();
-        dentry.entries.insert(
-            new_name.to_str().unwrap().to_string(),
-            inode.id,
-        );
+        dentry
+            .entries
+            .insert(new_name.to_str().unwrap().to_string(), inode.id);
 
-        if self.write_dentry(&mut new_parent_inode, &mut dentry).is_err() {
+        if self
+            .write_dentry(&mut new_parent_inode, &mut dentry)
+            .is_err()
+        {
             reply.error(EIO);
             return;
         }
@@ -1685,5 +1734,97 @@ impl Filesystem for Mfsr {
         }
 
         reply.ok();
+    }
+
+    fn rmdir(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let mut inode = match self.lookup_inode(parent, name) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let mut parent_inode = match self.get_inode(parent) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if self.get_dentry(&inode).unwrap().entries.len() > 2 {
+            reply.error(ENOTEMPTY);
+            return;
+        }
+
+        if !self.check_access(
+            parent_inode.uid,
+            parent_inode.gid,
+            parent_inode.mode as u16,
+            req.uid(),
+            req.gid(),
+            libc::W_OK,
+        ) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        if parent_inode.mode & libc::S_ISVTX != 0
+            && req.uid() != 0
+            && req.uid() != parent_inode.uid
+            && req.uid() != inode.uid
+        {
+            reply.error(EACCES);
+            return;
+        }
+
+        parent_inode.last_metadata_changed = current_timestamp();
+        parent_inode.last_modified = current_timestamp();
+
+        if self.write_inode(&mut parent_inode).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
+        inode.hard_links = 0;
+        inode.last_metadata_changed = current_timestamp();
+
+        if self.write_inode(&mut inode).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
+        self.delete_inode(inode.id);
+
+        let mut dentry = self.get_dentry(&parent_inode).unwrap();
+        dentry.entries.remove(name.to_str().unwrap());
+
+        if self.write_dentry(&mut parent_inode, &mut dentry).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
+        reply.ok();
+    }
+
+    fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        match self.get_inode(ino) {
+            Some(inode) => {
+                if self.check_access(
+                    inode.uid,
+                    inode.gid,
+                    inode.mode as u16,
+                    req.uid(),
+                    req.gid(),
+                    mask,
+                ) {
+                    reply.ok();
+                } else {
+                    reply.error(libc::EACCES);
+                }
+            }
+            None => reply.error(ENOENT),
+        }
     }
 }
