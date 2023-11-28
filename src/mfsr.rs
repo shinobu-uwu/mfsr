@@ -1,5 +1,5 @@
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write},
     mem::{size_of, size_of_val},
@@ -9,12 +9,12 @@ use std::{
 
 use anyhow::Result;
 use fuser::{
-    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
+    FileType, Filesystem, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
     TimeOrNow, FUSE_ROOT_ID,
 };
 use libc::{
-    c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, R_OK, S_ISGID, S_ISUID, W_OK,
-    X_OK,
+    c_int, EACCES, EEXIST, EFBIG, EINVAL, EIO, ENAMETOOLONG, ENOENT, RENAME_EXCHANGE, R_OK,
+    S_ISGID, S_ISUID, W_OK, X_OK,
 };
 use memmap2::{MmapMut, MmapOptions};
 
@@ -209,7 +209,8 @@ impl Mfsr {
                 continue;
             }
 
-            let (group_id, bitmap_byte_index, bitmap_bit_index) = self.data_block_bitmap_offset(pointer);
+            let (group_id, bitmap_byte_index, bitmap_bit_index) =
+                self.data_block_bitmap_offset(pointer);
             let group = &mut self.block_groups[group_id as usize];
             group.data_bitmap[bitmap_byte_index as usize] &= !(1 << bitmap_bit_index);
         }
@@ -1403,14 +1404,286 @@ impl Filesystem for Mfsr {
 
     fn rename(
         &mut self,
-        _req: &Request<'_>,
+        req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        newparent: u64,
-        newname: &OsStr,
+        new_parent: u64,
+        new_name: &OsStr,
         flags: u32,
         reply: ReplyEmpty,
     ) {
-        todo!()
+        let mut inode = match self.lookup_inode(parent, name) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let mut parent_inode = match self.get_inode(parent) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if !self.check_access(
+            parent_inode.uid,
+            parent_inode.gid,
+            parent_inode.mode as u16,
+            req.uid(),
+            req.gid(),
+            libc::W_OK,
+        ) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        // "Sticky bit" handling
+        if parent_inode.mode & libc::S_ISVTX != 0
+            && req.uid() != 0
+            && req.uid() != parent_inode.uid
+            && req.uid() != inode.uid
+        {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        let mut new_parent_inode = match self.get_inode(new_parent) {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if !self.check_access(
+            new_parent_inode.uid,
+            new_parent_inode.gid,
+            new_parent_inode.mode as u16,
+            req.uid(),
+            req.gid(),
+            libc::W_OK,
+        ) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        // "Sticky bit" handling in new_parent
+        if new_parent_inode.mode & libc::S_ISVTX != 0 {
+            if let Some(existing_inode) = self.lookup_inode(new_parent, new_name) {
+                if req.uid() != 0
+                    && req.uid() != new_parent_inode.uid
+                    && req.uid() != existing_inode.uid
+                {
+                    reply.error(EACCES);
+                    return;
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if flags & RENAME_EXCHANGE as u32 != 0 {
+            let mut new_inode = match self.lookup_inode(new_parent, new_name) {
+                Some(i) => i,
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            let mut new_inode_dentry = match self.get_dentry(&new_inode) {
+                Ok(d) => d,
+                Err(_) => {
+                    reply.error(EIO);
+                    return;
+                }
+            };
+
+            new_inode_dentry
+                .entries
+                .insert(new_name.to_str().unwrap().to_string(), inode.id);
+
+            if self
+                .write_dentry(&mut new_inode, &mut new_inode_dentry)
+                .is_err()
+            {
+                reply.error(EIO);
+                return;
+            }
+
+            let mut parent_dentry = match self.get_dentry(&parent_inode) {
+                Ok(d) => d,
+                Err(_) => {
+                    reply.error(EIO);
+                    return;
+                }
+            };
+            parent_dentry
+                .entries
+                .insert(name.to_str().unwrap().to_string(), new_inode.id);
+
+            parent_inode.last_metadata_changed = current_timestamp();
+            parent_inode.last_modified = current_timestamp();
+
+            if self.write_inode(&mut parent_inode).is_err() {
+                reply.error(EIO);
+                return;
+            }
+
+            new_parent_inode.last_metadata_changed = current_timestamp();
+            new_parent_inode.last_modified = current_timestamp();
+
+            if self.write_inode(&mut new_parent_inode).is_err() {
+                reply.error(EIO);
+                return;
+            }
+
+            inode.last_metadata_changed = current_timestamp();
+
+            if self.write_inode(&mut inode).is_err() {
+                reply.error(EIO);
+                return;
+            }
+
+            new_inode.last_metadata_changed = current_timestamp();
+
+            if self.write_inode(&mut new_inode).is_err() {
+                reply.error(EIO);
+                return;
+            }
+
+            if inode.kind == FileType::Directory {
+                let mut dentry = self.get_dentry(&inode).unwrap();
+                dentry.entries.insert("..".to_string(), new_parent);
+
+                if self.write_dentry(&mut inode, &mut dentry).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+
+                if self.write_inode(&mut inode).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+            }
+
+            if new_inode.kind == FileType::Directory {
+                let mut dentry = self.get_dentry(&new_inode).unwrap();
+                dentry.entries.insert("..".to_string(), parent);
+
+                if self.write_dentry(&mut new_inode, &mut dentry).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+
+                if self.write_inode(&mut new_inode).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+            }
+
+            reply.ok();
+            return;
+        }
+
+        // Only overwrite an existing directory if it's empty
+        if let Some(new_name_inode) = self.lookup_inode(new_parent, new_name) {
+            if new_name_inode.kind == FileType::Directory
+                && self.get_dentry(&new_name_inode).unwrap().entries.len() > 2
+            {
+                reply.error(libc::ENOTEMPTY);
+                return;
+            }
+        }
+
+        if inode.kind == FileType::Directory
+            && parent != new_parent
+            && !self.check_access(
+                inode.uid,
+                inode.gid,
+                inode.mode as u16,
+                req.uid(),
+                req.gid(),
+                libc::W_OK,
+            )
+        {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        // If target already exists decrement its hardlink count
+        if let Some(mut existing_inode) = self.lookup_inode(new_parent, new_name) {
+            let mut dentry = self.get_dentry(&parent_inode).unwrap();
+            dentry.entries.remove(new_name.to_str().unwrap());
+
+            if self.write_dentry(&mut parent_inode, &mut dentry).is_err() {
+                reply.error(EIO);
+                return;
+            }
+
+            if existing_inode.kind == FileType::Directory {
+                existing_inode.hard_links = 0;
+            } else {
+                existing_inode.hard_links -= 1;
+            }
+
+            existing_inode.last_metadata_changed = current_timestamp();
+
+            if self.write_inode(&mut existing_inode).is_err() {
+                reply.error(EIO);
+                return;
+            }
+
+            if existing_inode.hard_links == 0 {
+                self.delete_inode(existing_inode.id);
+            }
+        }
+
+        let mut dentry = self.get_dentry(&parent_inode).unwrap();
+        dentry.entries.remove(name.to_str().unwrap());
+
+        if self.write_dentry(&mut parent_inode, &mut dentry).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
+        let mut dentry = self.get_dentry(&new_parent_inode).unwrap();
+        dentry.entries.insert(
+            new_name.to_str().unwrap().to_string(),
+            inode.id,
+        );
+
+        if self.write_dentry(&mut new_parent_inode, &mut dentry).is_err() {
+            reply.error(EIO);
+            return;
+        }
+
+        parent_inode.last_metadata_changed = current_timestamp();
+        parent_inode.last_modified = current_timestamp();
+        self.write_inode(&mut parent_inode).unwrap();
+        new_parent_inode.last_metadata_changed = current_timestamp();
+        new_parent_inode.last_modified = current_timestamp();
+        self.write_inode(&mut new_parent_inode).unwrap();
+        inode.last_metadata_changed = current_timestamp();
+        self.write_inode(&mut inode).unwrap();
+
+        if inode.kind == FileType::Directory {
+            let mut dentry = self.get_dentry(&inode).unwrap();
+            dentry.entries.insert("..".to_string(), new_parent);
+
+            if self.write_dentry(&mut inode, &mut dentry).is_err() {
+                reply.error(EIO);
+                return;
+            }
+
+            if self.write_inode(&mut inode).is_err() {
+                reply.error(EIO);
+                return;
+            }
+        }
+
+        reply.ok();
     }
 }
