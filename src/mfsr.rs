@@ -1049,7 +1049,8 @@ impl Filesystem for Mfsr {
                     }
                 };
 
-                let indirect_pointer_offset = i + start_block - pointers_per_indirect_block - 12;
+                let indirect_pointer_offset = (i + start_block - pointers_per_indirect_block - 12)
+                    / pointers_per_indirect_block;
                 let mut indirect_pointer = indirect_pointers[indirect_pointer_offset];
 
                 if indirect_pointer == 0 {
@@ -1068,11 +1069,8 @@ impl Filesystem for Mfsr {
 
                 let direct_pointers_per_block =
                     self.super_block.block_size as usize / size_of::<u32>();
-
-                let direct_pointer_offset = (i + start_block
-                    - pointers_per_indirect_block * pointers_per_indirect_block
-                    - 12)
-                    / direct_pointers_per_block;
+                let indirect_pointer_offset = (i + start_block - pointers_per_indirect_block - 12)
+                    / pointers_per_indirect_block;
 
                 let mut direct_pointers = match self.read_indirect_pointer(indirect_pointer) {
                     Ok(p) => p,
