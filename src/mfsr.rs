@@ -1022,7 +1022,7 @@ impl Filesystem for Mfsr {
                     }
                 }
             }  else {
-                reply.error(EINVAL);
+                reply.error(EFBIG);
                 return;
             }
         }
