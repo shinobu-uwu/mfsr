@@ -35,13 +35,13 @@ pub fn time_or_now_to_timestamp(time_or_now: TimeOrNow) -> u64 {
 
 #[inline(always)]
 pub fn get_block_group_size(block_size: u32) -> u64 {
-    let result = block_size as u64 // super block
+    
+
+    block_size as u64 // super block
     + block_size as u64 // data bitmap
     + block_size as u64 // inode bitmap
     + get_inode_table_size(block_size)
-    + get_data_block_size(block_size);
-
-    result as u64
+    + get_data_block_size(block_size)
 }
 
 #[inline(always)]

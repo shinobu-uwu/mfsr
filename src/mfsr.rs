@@ -115,7 +115,7 @@ impl Mfsr {
             access_mask -= access_mask & file_mode;
         }
 
-        return access_mask == 0;
+        access_mask == 0
     }
 
     fn parse_flags(&self, flags: i32) -> Result<(c_int, bool, bool), c_int> {
@@ -158,7 +158,7 @@ impl Mfsr {
             return false;
         }
 
-        let bitmap_byte = group.inode_bitmap[bitmap_byte_index as usize];
+        let bitmap_byte = group.inode_bitmap[bitmap_byte_index];
         let mask = 1 << bitmap_bit_index;
 
         (bitmap_byte & mask) != 0
@@ -173,7 +173,7 @@ impl Mfsr {
         let mmap = self.io_map.as_mut();
         let mut cursor = Cursor::new(mmap);
         cursor
-            .seek(std::io::SeekFrom::Start(offset as u64))
+            .seek(std::io::SeekFrom::Start(offset))
             .unwrap();
 
         Some(Inode::deserialize_from(&mut cursor).unwrap())
@@ -181,14 +181,14 @@ impl Mfsr {
 
     fn write_inode(&mut self, inode: &mut Inode) -> anyhow::Result<()> {
         let (group_id, bitmap_byte_index, bitmap_bit_index) = self.inode_bitmap_offset(inode.id);
-        let group = &mut self.block_groups[group_id as usize];
-        let creation = group.inode_bitmap[bitmap_byte_index as usize] & 1 << bitmap_bit_index == 0;
-        group.inode_bitmap[bitmap_byte_index as usize] |= 1 << bitmap_bit_index;
+        let group = &mut self.block_groups[group_id];
+        let creation = group.inode_bitmap[bitmap_byte_index] & 1 << bitmap_bit_index == 0;
+        group.inode_bitmap[bitmap_byte_index] |= 1 << bitmap_bit_index;
 
         let offset = self.inode_table_offset(inode.id);
         let mmap = self.io_map.as_mut();
         let mut cursor = Cursor::new(mmap);
-        cursor.seek(std::io::SeekFrom::Start(offset as u64))?;
+        cursor.seek(std::io::SeekFrom::Start(offset))?;
         inode.serialize_into(&mut cursor)?;
 
         if creation {
@@ -201,8 +201,8 @@ impl Mfsr {
     fn delete_inode(&mut self, inode_id: u64) {
         let inode = self.get_inode(inode_id).unwrap();
         let (group_id, bitmap_byte_index, bitmap_bit_index) = self.inode_bitmap_offset(inode_id);
-        let group = &mut self.block_groups[group_id as usize];
-        group.inode_bitmap[bitmap_byte_index as usize] &= !(1 << bitmap_bit_index);
+        let group = &mut self.block_groups[group_id];
+        group.inode_bitmap[bitmap_byte_index] &= !(1 << bitmap_bit_index);
         self.super_block.free_inodes += 1;
 
         for pointer in inode.direct_pointers {
@@ -212,8 +212,8 @@ impl Mfsr {
 
             let (group_id, bitmap_byte_index, bitmap_bit_index) =
                 self.data_block_bitmap_offset(pointer);
-            let group = &mut self.block_groups[group_id as usize];
-            group.data_bitmap[bitmap_byte_index as usize] &= !(1 << bitmap_bit_index);
+            let group = &mut self.block_groups[group_id];
+            group.data_bitmap[bitmap_byte_index] &= !(1 << bitmap_bit_index);
         }
     }
 
@@ -286,12 +286,12 @@ impl Mfsr {
     #[inline(always)]
     fn data_block_id_to_address(&self, block_id: u32) -> u32 {
         let cluster_size = self.super_block.block_size;
-        let group_id = block_id / self.super_block.block_size as u32;
+        let group_id = block_id / self.super_block.block_size;
         let offset = (block_id - 1) - group_id * cluster_size;
 
         group_id * get_block_group_size(self.super_block.block_size) as u32
             + cluster_size * 3 // super block + data bitmap + inode bitmap
-            + get_inode_table_size(cluster_size as u32) as u32
+            + get_inode_table_size(cluster_size) as u32
             + offset * cluster_size
     }
 
@@ -300,7 +300,7 @@ impl Mfsr {
             for (byte_index, byte) in group.data_bitmap.iter().enumerate() {
                 for bit_index in 0..8 {
                     if byte >> bit_index & 1 == 0 {
-                        return (group_id as u32 * self.super_block.block_size as u32)
+                        return (group_id as u32 * self.super_block.block_size)
                             + (byte_index as u32 * 8)
                             + bit_index as u32
                             + 1;
@@ -407,7 +407,7 @@ impl Mfsr {
     #[inline(always)]
     fn read_data(&mut self, block_id: u32, buf: &mut [u8]) -> Result<()> {
         if block_id == 0 {
-            println!("");
+            println!();
         }
         let address = self.data_block_id_to_address(block_id);
         let mut cursor = Cursor::new(self.io_map.as_ref());
@@ -553,7 +553,7 @@ impl Filesystem for Mfsr {
     }
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        if name.len() > MAX_NAME_LENGTH as usize {
+        if name.len() > MAX_NAME_LENGTH {
             reply.error(ENAMETOOLONG);
             return;
         }
@@ -605,7 +605,7 @@ impl Filesystem for Mfsr {
             if req.uid() != 0 && req.gid() != inode.gid {
                 // if SGID is set and the file belongs to a group that the caller is not part of
                 // then the SGID bit is suppose to be cleared during chmod
-                inode.mode = mode & !S_ISGID as u32;
+                inode.mode = mode & !S_ISGID;
             } else {
                 inode.mode = mode;
             }
@@ -823,7 +823,6 @@ impl Filesystem for Mfsr {
 
         let inode = self.get_inode(ino).unwrap();
         reply.attr(&Duration::new(0, 0), &inode.to_file_attr(&self.super_block));
-        return;
     }
 
     fn open(&mut self, req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
@@ -890,10 +889,10 @@ impl Filesystem for Mfsr {
         }
 
         if req.uid() != 0 {
-            mode &= !(S_ISUID | S_ISGID) as u32;
+            mode &= !(S_ISUID | S_ISGID);
         }
         if parent_inode.mode & S_ISGID != 0 {
-            mode |= S_ISGID as u32;
+            mode |= S_ISGID;
         }
 
         let mut new_inode = Inode::new(
@@ -1284,7 +1283,7 @@ impl Filesystem for Mfsr {
         }
 
         if req.uid() != 0 {
-            mode &= !(S_ISUID | S_ISGID) as u32;
+            mode &= !(S_ISUID | S_ISGID);
         }
 
         let mut new_inode = Inode::new(
@@ -1492,7 +1491,7 @@ impl Filesystem for Mfsr {
         }
 
         #[cfg(target_os = "linux")]
-        if flags & RENAME_EXCHANGE as u32 != 0 {
+        if flags & RENAME_EXCHANGE != 0 {
             let mut new_inode = match self.lookup_inode(new_parent, new_name) {
                 Some(i) => i,
                 None => {
